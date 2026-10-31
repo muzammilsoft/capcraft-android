@@ -100,6 +100,16 @@ jobs:
       - name: sherpa-onnx for Android
         run: src/scripts/sherpa-mobile.sh aarch64-linux-android
 
+      # KG fork fix (2026-10-31): bundle the voice model so Isolate voice
+      # works offline. The model is not stored in git (a 535 KB binary);
+      # CI fetches it from upstream and checks its digest, and the app
+      # copies it from APK assets to the engine folder on start.
+      - name: Voice model (bundled)
+        run: |
+          mkdir -p src/crates/capcraft-android/android/app/src/main/assets
+          curl -fsSL -o src/crates/capcraft-android/android/app/src/main/assets/gtcrn_simple.onnx https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx
+          echo "e77603ac0c23dac3227dd2d7135b3a585cbee2679048aecfa886657d3ae1b534  src/crates/capcraft-android/android/app/src/main/assets/gtcrn_simple.onnx" | sha256sum -c -
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src

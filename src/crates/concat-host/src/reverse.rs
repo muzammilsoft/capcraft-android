@@ -362,6 +362,7 @@ fn segment_options() -> EncodeOptions {
         hardware: false,
         threads: 2,
         software_only: false,
+        exclude_component: None,
     }
 }
 
@@ -379,6 +380,7 @@ fn copy_options() -> EncodeOptions {
         hardware: false,
         threads: 2,
         software_only: false,
+        exclude_component: None,
     }
 }
 

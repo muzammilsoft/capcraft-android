@@ -1983,6 +1983,7 @@ mod tests {
             hardware: false,
             threads: 0,
             software_only: false,
+            exclude_component: None,
         };
         let mut encoder = Encoder::create_tagged(
             &path,

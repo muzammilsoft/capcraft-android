@@ -239,6 +239,7 @@ pub fn write(
         hardware: hdr,
         threads: 2,
         software_only: false,
+        exclude_component: None,
     };
     let mut encoder = if hdr {
         Encoder::create_hdr(&partial, width, height, rate, &encoding, signal)

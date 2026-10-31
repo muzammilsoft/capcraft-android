@@ -1796,6 +1796,7 @@ fn render_picture(
         hardware: true,
         threads: 0,
         software_only: false,
+        exclude_component: None,
     };
     // An HDR file comes out of the compositor as its signal, sixteen bits a
     // channel; anything else, SDR - an HDR timeline's tone-mapped.
@@ -2027,8 +2028,9 @@ fn render_picture(
             if let Err(error) = encoder.write_frame(&composed) {
                 // The stopped encoder is closed before the file is opened
                 // again, so the chip has its session back.
+                let component = encoder.component();
                 drop(encoder);
-                again_in_software(&error, &mut options, index, total_frames)?;
+                again_in_software(&error, &mut options, component, index, total_frames)?;
                 reporter.emit(0, total_frames, RENDERING_IN_SOFTWARE);
                 continue 'pass;
             }
@@ -2047,8 +2049,9 @@ fn render_picture(
         match encoder.finish() {
             Ok(()) => return Ok(()),
             Err(error) => {
+                let component = encoder.component();
                 drop(encoder);
-                again_in_software(&error, &mut options, total_frames, total_frames)?;
+                again_in_software(&error, &mut options, component, total_frames, total_frames)?;
                 reporter.emit(0, total_frames, RENDERING_IN_SOFTWARE);
             }
         }
@@ -2062,24 +2065,35 @@ pub const RENDERING_IN_SOFTWARE: &str = "rendering in software";
 
 /// Whether an export goes again after its encoder failed with `error`,
 /// `frame` frames of `total` in, having opened it with `options`: once,
-/// and only when it was the platform's hardware encoder that stopped
-/// taking frames (#491) - a phone's chip that took the export's settings
-/// and then went quiet. `options` is then set to the CPU's encoder alone,
-/// and the export starts again from its first frame. Anything else ends
-/// the export with its reason.
+/// and only when the encoder stalled - took no frame, or held its last
+/// frames, for ten seconds. KG fork (2026-10-31): the old rule retried
+/// only a stall on the platform's hardware encoder (#491), but on a phone
+/// the first pass may already be a MediaCodec software component (the
+/// hardware ask and the plain ask both refused to open, so the component
+/// opened instead, with `hardware` false), and that component can stall
+/// at frame zero exactly as the chip does - the export in the bug report
+/// failed with the plain stall message, not the "software failed too"
+/// message, which is the signature of this case. The retry therefore
+/// runs for any stall, sets the CPU's encoder alone, and never tries
+/// the stalled component again (`exclude_component`): on a phone the
+/// retry tries the other software component (c2 vs OMX), not the one
+/// that just went quiet. A stall on the retry, or any failure that is
+/// not a stall, ends the export with its reason.
 fn again_in_software(
     error: &concat_media::Error,
     options: &mut EncodeOptions,
+    component: Option<&'static str>,
     frame: i64,
     total: i64,
 ) -> Result<(), String> {
-    if options.software_only || !error.stalled_on_hardware() {
+    if options.software_only || !matches!(error, concat_media::Error::Stalled { .. }) {
         return Err(failed_encoding(error, options));
     }
     log::warn!(
-        "export: {error}, {frame} frames of {total} in; starting again on the software encoder"
+        "export: {error}, {frame} frames of {total} in; starting again on the software encoder, without component {component:?}"
     );
     options.software_only = true;
+    options.exclude_component = component;
     Ok(())
 }
 
@@ -2088,7 +2102,7 @@ fn again_in_software(
 fn failed_encoding(error: &concat_media::Error, options: &EncodeOptions) -> String {
     if options.software_only {
         format!(
-            "the hardware encoder stopped taking frames part way through, and the slower \
+            "the first encoder stopped taking frames part way through, and the slower \
              software encoder the export went on with failed too: {error}"
         )
     } else {
@@ -3926,10 +3940,12 @@ mod tests {
         assert!(progress_due(7, PROGRESS_INTERVAL));
     }
 
-    /// A phone's chip that stops taking frames part way through an export
-    /// sends the export round once more on the CPU's encoder; a second
-    /// stall, or any other failure, ends it with words that say what was
-    /// tried (#491).
+    /// A phone's encoder that stops taking frames part way through an
+    /// export sends the export round once more on the CPU's encoder;
+    /// a second stall, or any other failure, ends it with words that
+    /// say what was tried (#491, KG fork 2026-10-31: a stall on a
+    /// MediaCodec software component goes again too, on the other
+    /// component, not the one that stalled).
     #[test]
     fn a_stalled_hardware_encoder_is_given_one_more_go_in_software() {
         let stall = |hardware| concat_media::Error::Stalled {
@@ -3939,34 +3955,38 @@ mod tests {
             hardware,
         };
         let mut options = EncodeOptions::default();
-        again_in_software(&stall(true), &mut options, 120, 480)
+        again_in_software(&stall(true), &mut options, None, 120, 480)
             .expect("the first stall on hardware goes again");
         assert!(options.software_only, "and goes again on the CPU");
 
-        // Once: a stall on the CPU, or anything else, then fails.
-        let error = again_in_software(&stall(false), &mut options, 30, 480)
+        // Once: a stall on the retry, or anything else, then fails.
+        let error = again_in_software(&stall(false), &mut options, None, 30, 480)
             .expect_err("the CPU stalling too ends the export");
         assert!(error.contains("software encoder"), "{error}");
         assert!(error.contains("took no frame for 10 seconds"), "{error}");
         assert!(options.software_only);
-        let error = again_in_software(&stall(true), &mut options, 30, 480)
+        let error = again_in_software(&stall(true), &mut options, None, 30, 480)
             .expect_err("never a third pass, whatever the encoder says");
         assert!(error.contains("failed too"), "{error}");
 
-        // A stall on the CPU first, or a failure that is not a stall, is
-        // said as it always was.
+        // A stall on a software component first also goes again, and
+        // never on the component that stalled.
+        let mut component_first = EncodeOptions::default();
+        again_in_software(&stall(false), &mut component_first, Some("c2.android.avc.encoder"), 0, 480)
+            .expect("a stalled component goes again on the other component");
+        assert!(component_first.software_only);
+        assert_eq!(component_first.exclude_component, Some("c2.android.avc.encoder"));
+
+        // A failure that is not a stall is said as it always was.
         let mut cpu_first = EncodeOptions::default();
-        assert_eq!(
-            again_in_software(&stall(false), &mut cpu_first, 30, 480),
-            Err("encode failed for out.mp4: the encoder took no frame for 10 seconds".to_owned())
-        );
+        let _ = cpu_first;
         let refused = concat_media::Error::Ffi {
             operation: "write packet",
             path: "out.mp4".into(),
             detail: "No space left on device".to_owned(),
         };
         let mut options = EncodeOptions::default();
-        assert!(again_in_software(&refused, &mut options, 30, 480).is_err());
+        assert!(again_in_software(&refused, &mut options, None, 30, 480).is_err());
         assert!(!cpu_first.software_only && !options.software_only);
     }
 

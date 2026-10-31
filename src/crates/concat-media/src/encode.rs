@@ -362,6 +362,11 @@ pub struct EncodeOptions {
     /// For an export going again after the hardware encoder stopped taking
     /// frames part way through (see [`Error::Stalled`]); off otherwise.
     pub software_only: bool,
+    /// A MediaCodec component a previous pass already stalled on, never
+    /// tried again on the retry pass: on a phone the retry must try the
+    /// other software component (c2 vs OMX), not the same one that just
+    /// took no frame for ten seconds. None otherwise.
+    pub exclude_component: Option<&'static str>,
 }
 
 impl Default for EncodeOptions {
@@ -377,6 +382,7 @@ impl Default for EncodeOptions {
             hardware: true,
             threads: 0,
             software_only: false,
+            exclude_component: None,
         }
     }
 }
@@ -759,10 +765,15 @@ fn allowed_attempts(
     options: &EncodeOptions,
 ) -> impl Iterator<Item = Attempt> {
     let software_only = options.software_only;
+    let excluded = options.exclude_component;
     attempts(encoder_name)
         .iter()
         .copied()
         .filter(move |attempt| !software_only || attempt.in_software(encoder_name))
+        .filter(move |attempt| match attempt {
+            Attempt::Component(name) => Some(*name) != excluded,
+            _ => true,
+        })
 }
 
 /// The most a plain ask puts on a phone's chip, in kb/s: room for a clean
@@ -1196,6 +1207,10 @@ pub struct Encoder {
     finished: bool,
     /// Which FFmpeg encoder took the job.
     encoder_name: &'static str,
+    /// The MediaCodec component that took it, by name, when one was asked
+    /// for by name (a phone's software component); None for a hardware
+    /// or plain ask, or a non-MediaCodec encoder.
+    component: Option<&'static str>,
     /// Whether it is the platform's hardware doing the work. Not the same
     /// as the name's family: `h264_mediacodec` asked for Android's own
     /// component by name encodes on the CPU.
@@ -1536,7 +1551,11 @@ impl Encoder {
                             log::warn!("{name} opened only when asked {attempt:?}");
                         }
                         let hardware = !attempt.in_software(name);
-                        opened = Some((name, codec, encoder, pixel_format, hardware));
+                        let component = match attempt {
+                            Attempt::Component(component) => Some(component),
+                            _ => None,
+                        };
+                        opened = Some((name, codec, encoder, pixel_format, hardware, component));
                         break 'encoders;
                     }
                     Err(error) => {
@@ -1546,7 +1565,7 @@ impl Encoder {
                 }
             }
         }
-        let Some((encoder_name, codec, encoder, pixel_format, hardware)) = opened else {
+        let Some((encoder_name, codec, encoder, pixel_format, hardware, component)) = opened else {
             // Nothing was even tried when the CPU alone was asked for and
             // every linked encoder is hardware.
             return Err(failure.unwrap_or_else(|| Error::Missing {
@@ -1658,6 +1677,7 @@ impl Encoder {
             finished: false,
             encoder_name,
             hardware,
+            component,
             color_range: options.color_range.as_ffmpeg(),
             deep,
             light: pq.then(LightLevel::new),
@@ -1674,6 +1694,12 @@ impl Encoder {
     /// component, whatever the encoder's name.
     pub fn on_hardware(&self) -> bool {
         self.hardware
+    }
+
+    /// The MediaCodec component that took the job, when one was asked for
+    /// by name; None otherwise.
+    pub fn component(&self) -> Option<&'static str> {
+        self.component
     }
 
     /// How many frames have been accepted so far.
@@ -2284,6 +2310,7 @@ mod tests {
             hardware: false,
             threads: 0,
             software_only: false,
+            exclude_component: None,
         };
         let rate = FrameRate::new(concat_core::time::Rational::new(25, 1));
         const FRAMES: u32 = 150;
@@ -2431,6 +2458,7 @@ mod tests {
     fn a_stalled_chip_is_passed_over_for_the_cpu() {
         let cpu = EncodeOptions {
             software_only: true,
+            exclude_component: None,
             ..EncodeOptions::default()
         };
         let asked = |name: &'static str, options: &EncodeOptions| -> Vec<Attempt> {
@@ -2505,6 +2533,7 @@ mod tests {
         let options = EncodeOptions {
             preset: "ultrafast".to_owned(),
             software_only: true,
+            exclude_component: None,
             ..EncodeOptions::default()
         };
         let mut encoder = Encoder::create(&path, 64, 64, FrameRate::THIRTY, &options)
@@ -2791,6 +2820,7 @@ mod tests {
                     hardware: true,
                     threads: 0,
                     software_only: false,
+                    exclude_component: None,
                 };
                 let mut encoder = Encoder::create(&path, 64, 64, FrameRate::THIRTY, &options)
                     .unwrap_or_else(|error| panic!("{} {ten_bit}: {error}", codec.label()));
@@ -2836,6 +2866,7 @@ mod tests {
             hardware: true,
             threads: 0,
             software_only: false,
+            exclude_component: None,
         };
         let refused = std::env::temp_dir().join("concat-encode-hdr-h264.mp4");
         assert!(
