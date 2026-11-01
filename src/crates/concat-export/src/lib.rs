@@ -2111,7 +2111,26 @@ fn again_in_software(
     frame: i64,
     total: i64,
 ) -> Result<(), String> {
+    // KG fork (2026-11-01): the 0.0.5-beta export log proved the c2
+    // software encoder stalls at frame 0 on the Y8p, after the hardware
+    // encoder stalled at frame 4 - so the one software retry is not
+    // enough. H.264 is the only codec with two software components,
+    // c2 then OMX, so a stall on c2 gets one more pass, on OMX, with
+    // c2 excluded. A stall on OMX, or on anything else, ends the
+    // export: there is no fourth encoder to try.
+    if options.software_only && component == Some("c2.android.avc.encoder") {
+        log::warn!(
+            "export: {error}, {frame} frames of {total} in; starting again on the other software encoder, without component {component:?}"
+        );
+        options.exclude_component = component;
+        return Ok(());
+    }
     if options.software_only || !matches!(error, concat_media::Error::Stalled { .. }) {
+        // The final failure was missing from the 0.0.5-beta log: the
+        // error only reached the screen, not the file. Log it here, so
+        // the next shared log ends with the failure, not with a pass
+        // that looks like it is still running.
+        log::error!("export: {error}, {frame} frames of {total} in; no more encoders to try");
         return Err(failed_encoding(error, options));
     }
     log::warn!(
@@ -2128,7 +2147,7 @@ fn failed_encoding(error: &concat_media::Error, options: &EncodeOptions) -> Stri
     if options.software_only {
         format!(
             "the first encoder stopped taking frames part way through, and the slower \
-             software encoder the export went on with failed too: {error}"
+             software encoders the export went on with failed too: {error}"
         )
     } else {
         error.to_string()
@@ -4001,6 +4020,16 @@ mod tests {
             .expect("a stalled component goes again on the other component");
         assert!(component_first.software_only);
         assert_eq!(component_first.exclude_component, Some("c2.android.avc.encoder"));
+
+        // KG fork 2026-11-01: a stall on c2, already on the software
+        // retry, goes again once more, on OMX - the other component -
+        // and a stall on OMX ends it.
+        again_in_software(&stall(false), &mut component_first, Some("c2.android.avc.encoder"), 0, 480)
+            .expect("a c2 stall on the software retry goes again on OMX");
+        assert_eq!(component_first.exclude_component, Some("c2.android.avc.encoder"));
+        let error = again_in_software(&stall(false), &mut component_first, Some("OMX.google.h264.encoder"), 0, 480)
+            .expect_err("an OMX stall ends the export");
+        assert!(error.contains("failed too"), "{error}");
 
         // A failure that is not a stall is said as it always was.
         let mut cpu_first = EncodeOptions::default();
