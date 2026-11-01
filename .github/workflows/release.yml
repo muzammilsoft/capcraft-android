@@ -115,6 +115,16 @@ jobs:
           workspaces: src
           key: release-android
 
+      # KG fork (2026-11-01): the fork has no release signing secret,
+      # and KG asked for a release APK signed with any test key, to
+      # share with friends as a plain APK from the Releases page,
+      # not a debug build from an artifact zip. When no secret key
+      # is present, generate a throwaway test key here, in the run
+      # only: it is never committed, never uploaded, and is deleted
+      # with the runner, so a later build with a fresh test key will
+      # require uninstalling the old version before installing the
+      # new one. A real, kept release key still wins whenever the
+      # secret is set.
       - name: Release key
         env:
           KEYSTORE_BASE64: ${{ secrets.CAPCRAFT_KEYSTORE_BASE64 }}
@@ -123,8 +133,12 @@ jobs:
             printf '%s' "$KEYSTORE_BASE64" | base64 -d >"$RUNNER_TEMP/release.p12"
             echo "CAPCRAFT_KEYSTORE=$RUNNER_TEMP/release.p12" >>"$GITHUB_ENV"
           elif [ "$GITHUB_REF_TYPE" = tag ]; then
-            echo "::error::No release key: a release is never signed with the debug key"
-            exit 1
+            echo "::warning::No release key secret: signing this tag build with a generated test key, discarded after the run"
+            keytool -genkeypair -keystore "$RUNNER_TEMP/test.p12" -storetype PKCS12 \
+              -alias capcraft-test -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass capcraft-test -keypass capcraft-test \
+              -dname "CN=CapCraft Test, O=CapCraft Test"
+            echo "CAPCRAFT_KEYSTORE=$RUNNER_TEMP/test.p12" >>"$GITHUB_ENV"
           else
             echo "::warning::No release key: this dry run is signed with the debug key"
           fi
@@ -132,9 +146,9 @@ jobs:
       - name: Build
         env:
           VERSION: ${{ steps.v.outputs.version }}
-          CAPCRAFT_KEYSTORE_PASSWORD: ${{ secrets.CAPCRAFT_KEYSTORE_PASSWORD }}
-          CAPCRAFT_KEY_ALIAS: ${{ secrets.CAPCRAFT_KEY_ALIAS }}
-          CAPCRAFT_KEY_PASSWORD: ${{ secrets.CAPCRAFT_KEY_PASSWORD }}
+          CAPCRAFT_KEYSTORE_PASSWORD: ${{ secrets.CAPCRAFT_KEYSTORE_PASSWORD || 'capcraft-test' }}
+          CAPCRAFT_KEY_ALIAS: ${{ secrets.CAPCRAFT_KEY_ALIAS || 'capcraft-test' }}
+          CAPCRAFT_KEY_PASSWORD: ${{ secrets.CAPCRAFT_KEY_PASSWORD || 'capcraft-test' }}
         run: |
           cd src
           eval "$(scripts/mobile-env.sh aarch64-linux-android)"
@@ -164,6 +178,7 @@ jobs:
           name: release-apk
           path: dist/*
           if-no-files-found: error
+          retention-days: 1
 
       - name: Remove the release key
         if: always()

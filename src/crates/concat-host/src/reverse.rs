@@ -262,30 +262,43 @@ fn footage(
         }
 
         // Pass two: the segments last to first, into the copy.
-        let mut encoder = Encoder::create(&partial_video, width, height, rate, &copy_options())
-            .map_err(|error| error.to_string())?;
-        let mut written = 0u64;
-        let encoded = (|| -> Result<(), String> {
-            for segment in segments.iter().rev() {
-                let mut reader =
-                    Decoder::open(segment, &DecodeOptions::default().in_software().threaded(2))
-                        .map_err(|error| error.to_string())?;
-                while let Some(frame) = reader.next_frame().map_err(|error| error.to_string())? {
-                    if job.cancelled() {
-                        return Err("reverse cancelled".to_owned());
-                    }
-                    encoder
-                        .write_frame(&frame)
-                        .map_err(|error| error.to_string())?;
-                    written += 1;
-                    progress((0.5 + 0.5 * written as f64 / count.max(1) as f64).min(0.99) as f32);
-                }
+        // KG fork (2026-11-01): the same MPEG-4 fallback as the
+        // segments. A stall here would otherwise move the failure
+        // from the segments to the copy, after the segments had
+        // already been re-encoded.
+        match write_copy(
+            &segments,
+            &partial_video,
+            width,
+            height,
+            rate,
+            &copy_options(),
+            job,
+            count,
+            &mut *progress,
+        ) {
+            Ok(()) => {}
+            Err(error)
+                if cfg!(target_os = "android") && error.contains("took no frame") =>
+            {
+                log::warn!("reverse: H.264 copy failed with {error}; trying MPEG-4, which does not use MediaCodec");
+                let _ = std::fs::remove_file(&partial_video);
+                write_copy(
+                    &segments,
+                    &partial_video,
+                    width,
+                    height,
+                    rate,
+                    &copy_options_for(VideoCodec::Mpeg4),
+                    job,
+                    count,
+                    &mut *progress,
+                )
+                .map_err(|fallback_error| {
+                    format!("{error}; MPEG-4 fallback also failed: {fallback_error}")
+                })?;
             }
-            encoder.finish().map_err(|error| error.to_string())
-        })();
-        if let Err(error) = encoded {
-            let _ = std::fs::remove_file(&partial_video);
-            return Err(error);
+            Err(error) => return Err(error),
         }
         Ok(())
     })();
@@ -327,14 +340,49 @@ fn write_segment(
         return Ok(());
     };
     let (width, height) = (first.width(), first.height());
-    let written = Encoder::create(&path, width, height, rate, &segment_options())
-        .and_then(|mut encoder| {
-            for frame in held.iter().rev() {
-                encoder.write_frame(frame)?;
+    // KG fork (2026-11-01): the export fix, applied here. On Android,
+    // H.264 means h264_mediacodec, which stalls after a few frames on
+    // the Y8p, in segments just as in exports. When the segment fails
+    // with that stall, try once more with MPEG-4, FFmpeg's own encoder,
+    // which never touches MediaCodec. The held frames are still here,
+    // so the retry re-encodes the same run.
+    let written = (|| -> Result<(), String> {
+        let first = Encoder::create(&path, width, height, rate, &segment_options())
+            .and_then(|mut encoder| {
+                for frame in held.iter().rev() {
+                    encoder.write_frame(frame)?;
+                }
+                encoder.finish()
+            })
+            .map_err(|error| error.to_string());
+        match first {
+            Ok(()) => Ok(()),
+            Err(error)
+                if cfg!(target_os = "android") && error.contains("took no frame") =>
+            {
+                log::warn!("reverse: H.264 segment failed with {error}; trying MPEG-4, which does not use MediaCodec");
+                let _ = std::fs::remove_file(&path);
+                Encoder::create(
+                    &path,
+                    width,
+                    height,
+                    rate,
+                    &segment_options_for(VideoCodec::Mpeg4),
+                )
+                .and_then(|mut encoder| {
+                    for frame in held.iter().rev() {
+                        encoder.write_frame(frame)?;
+                    }
+                    encoder.finish()
+                })
+                .map_err(|error| error.to_string())
+                .map_err(|fallback_error| {
+                    format!("{error}; MPEG-4 fallback also failed: {fallback_error}")
+                })
             }
-            encoder.finish()
-        })
-        .map_err(|error| error.to_string());
+            Err(error) => Err(error),
+        }
+    })();
     held.clear();
     match written {
         Ok(()) => {
@@ -348,11 +396,58 @@ fn write_segment(
     }
 }
 
+/// Pass two of a reverse: the segments last to first, into `target`,
+/// with `options`. Separate so the copy can be retried with a
+/// different codec without re-reading the span.
+#[allow(clippy::too_many_arguments)]
+fn write_copy(
+    segments: &[PathBuf],
+    target: &Path,
+    width: u32,
+    height: u32,
+    rate: FrameRate,
+    options: &EncodeOptions,
+    job: &crate::jobs::Job,
+    count: u64,
+    progress: &mut dyn FnMut(f32),
+) -> Result<(), String> {
+    let mut encoder = Encoder::create(target, width, height, rate, options)
+        .map_err(|error| error.to_string())?;
+    let mut written = 0u64;
+    let encoded = (|| -> Result<(), String> {
+        for segment in segments.iter().rev() {
+            let mut reader =
+                Decoder::open(segment, &DecodeOptions::default().in_software().threaded(2))
+                    .map_err(|error| error.to_string())?;
+            while let Some(frame) = reader.next_frame().map_err(|error| error.to_string())? {
+                if job.cancelled() {
+                    return Err("reverse cancelled".to_owned());
+                }
+                encoder
+                    .write_frame(&frame)
+                    .map_err(|error| error.to_string())?;
+                written += 1;
+                progress((0.5 + 0.5 * written as f64 / count.max(1) as f64).min(0.99) as f32);
+            }
+        }
+        encoder.finish().map_err(|error| error.to_string())
+    })();
+    if let Err(error) = encoded {
+        let _ = std::fs::remove_file(target);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// A segment lives minutes and is read once: the fastest preset there is,
 /// at a quality nothing is lost through.
 fn segment_options() -> EncodeOptions {
+    segment_options_for(VideoCodec::H264)
+}
+
+fn segment_options_for(codec: VideoCodec) -> EncodeOptions {
     EncodeOptions {
-        codec: VideoCodec::H264,
+        codec,
         preset: "ultrafast".to_owned(),
         crf: 8,
         rate_mode: RateMode::Vbr,
@@ -369,8 +464,12 @@ fn segment_options() -> EncodeOptions {
 /// The copy the timeline reads for as long as the project lives:
 /// near-transparent quality, as the enhanced copy is written.
 fn copy_options() -> EncodeOptions {
+    copy_options_for(VideoCodec::H264)
+}
+
+fn copy_options_for(codec: VideoCodec) -> EncodeOptions {
     EncodeOptions {
-        codec: VideoCodec::H264,
+        codec,
         preset: "medium".to_owned(),
         crf: 16,
         rate_mode: RateMode::Vbr,
