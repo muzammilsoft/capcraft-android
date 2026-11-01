@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -97,16 +99,23 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
     var progress by remember { mutableFloatStateOf(0f) }
     // a new try after a failure starts the export again
     var attempt by remember { mutableIntStateOf(0) }
+    // the export log, read from this run's engine log file when a failure asks for it
+    var showLog by remember { mutableStateOf(false) }
+    var logText by remember { mutableStateOf("") }
     // the notification an export in the background shows its progress in; asked for once
     val notify = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
     ) {}
 
     BackHandler {
-        if (stage is Stage.Running) {
-            runCatching { cancelExport() }
+        if (showLog) {
+            showLog = false
+        } else {
+            if (stage is Stage.Running) {
+                runCatching { cancelExport() }
+            }
+            onClose()
         }
-        onClose()
     }
 
     LaunchedEffect(attempt) {
@@ -209,8 +218,11 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
     ) {
         Row(Modifier.fillMaxWidth().height(50.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(44.dp).clickable {
-                if (stage is Stage.Running) runCatching { cancelExport() }
-                onClose()
+                if (showLog) showLog = false
+                else {
+                    if (stage is Stage.Running) runCatching { cancelExport() }
+                    onClose()
+                }
             }, contentAlignment = Alignment.Center) {
                 Glyph(if (stage is Stage.Done) LucideIcons.ChevronLeft else LucideIcons.X, Palette.Text, size = 26.dp)
             }
@@ -296,6 +308,13 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                             attempt++
                         }.padding(horizontal = 24.dp, vertical = 10.dp),
                     ) { Text("Try again", style = Type.BodyStrong.copy(color = Color.White)) }
+                    Spacer(Modifier.height(12.dp))
+                    Box(
+                        Modifier.clip(RoundedCornerShape(8.dp)).background(Color(0x22FFFFFF)).clickable {
+                            logText = loadExportLog(context)
+                            showLog = true
+                        }.padding(horizontal = 24.dp, vertical = 10.dp),
+                    ) { Text("View export log", style = Type.BodyStrong) }
                 }
             }
         }
@@ -304,6 +323,30 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                 Modifier.padding(16.dp).fillMaxWidth().height(44.dp).clip(RoundedCornerShape(8.dp)).background(Color(0x22FFFFFF)).clickable(onClick = onHome),
                 contentAlignment = Alignment.Center,
             ) { Text("New project", style = Type.BodyStrong) }
+        }
+    }
+    if (showLog) {
+        // The export log, full screen: what the engine wrote during this
+        // run's export, filtered to export and encoder lines, so a
+        // failure can be read and shared instead of guessed at.
+        Column(
+            Modifier.fillMaxSize().background(Color(0xFF0D0D0D)).statusBarsPadding().navigationBarsPadding().padding(16.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Export log", style = Type.BodyStrong.copy(fontSize = 18.sp), modifier = Modifier.weight(1f))
+                Text("Close", style = Type.BodyStrong, modifier = Modifier.clickable { showLog = false }.padding(12.dp))
+            }
+            Spacer(Modifier.height(12.dp))
+            Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                Text(logText, style = Type.Small.copy(fontSize = 12.sp))
+            }
+            Spacer(Modifier.height(12.dp))
+            Box(
+                Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(8.dp)).background(Palette.Accent).clickable {
+                    shareExportLog(context, logText)
+                },
+                contentAlignment = Alignment.Center,
+            ) { Text("Share export log", style = Type.BodyStrong.copy(color = Color.White)) }
         }
     }
 }
@@ -386,6 +429,48 @@ private fun publish(context: Context, file: File): Uri? = runCatching {
     file.delete()
     uri
 }.getOrNull()
+
+/**
+ * The export lines from this run's engine log file, in the app's private
+ * engine folder, or a plain sentence saying why there are none. The file
+ * is named by the run's start time, so the newest one is this run's.
+ * The first lines (build, system, cpu) are kept, then every line about
+ * the export, its encoder, its GPU or a failure, capped at 300 lines so
+ * the screen stays readable.
+ */
+private fun loadExportLog(context: Context): String {
+    return runCatching {
+        val folder = File(context.filesDir, "engine/logs")
+        val files = folder.listFiles { f -> f.name.startsWith("concat-") && f.name.endsWith(".log") }
+            ?.sortedByDescending { it.name } ?: return@runCatching "No engine log folder found."
+        val latest = files.firstOrNull() ?: return@runCatching "No engine log file found."
+        val lines = latest.readLines()
+        val kept = mutableListOf<String>()
+        kept.addAll(lines.take(3))
+        val wanted = listOf("export", "encoder", "mediacodec", "would not open", "stalled", "starting again", "rendering", "GPU", "compositor", "failed", "panic")
+        for (line in lines) {
+            if (wanted.any { line.contains(it, ignoreCase = true) }) kept.add(line)
+            if (kept.size >= 300) break
+        }
+        if (kept.isEmpty()) "No export lines in ${latest.name}." else kept.joinToString("\n")
+    }.getOrElse { "Could not read the export log: ${it.message}" }
+}
+
+/** Writes the export log to the cache exports folder and shares it. */
+private fun shareExportLog(context: Context, text: String) {
+    runCatching {
+        val folder = File(context.cacheDir, "exports").apply { mkdirs() }
+        val name = "export-log-" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".txt"
+        val file = File(folder, name).apply { writeText(text) }
+        val uri = androidx.core.content.FileProvider.getUriForFile(context, context.packageName + ".files", file)
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(send, null))
+    }
+}
 
 private fun share(context: Context, uri: Uri) {
     val send = Intent(Intent.ACTION_SEND).apply {

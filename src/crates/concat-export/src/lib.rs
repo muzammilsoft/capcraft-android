@@ -1758,6 +1758,25 @@ fn render_picture(
         adapter.device_type,
         adapter.backend
     );
+    // KG fork export log (2026-11-01): one line that says everything a
+    // failed export is first asked about - size, rate, frame count,
+    // codec and quality - so the log on the failure screen is a
+    // diagnosis, not a single error sentence.
+    log::info!(
+        "export: request {}x{} at {}/{} fps, codec {:?}, crf {}, preset {}, bitrate {} kbps, rate_mode {:?}, ten_bit {}, hdr {}, clips {}",
+        request.width,
+        request.height,
+        request.rate_num,
+        request.rate_den,
+        request.codec,
+        request.crf,
+        request.preset,
+        request.bitrate_kbps,
+        request.rate_mode,
+        request.ten_bit,
+        request.hdr,
+        request.clips.len()
+    );
     // The request was held to the document's ceiling; a phone's GPU can
     // hold less, and a frame past it is said here rather than failed on.
     let most = compositor.max_side();
@@ -1839,13 +1858,16 @@ fn render_picture(
         }
         .map_err(|error| failed_encoding(&error, &options))?;
         log::info!(
-            "export: encoding with {} ({})",
+            "export: encoding with {} ({}, component {:?}) at {}x{}",
             encoder.encoder_name(),
             if encoder.on_hardware() {
                 "hardware"
             } else {
                 "software"
-            }
+            },
+            encoder.component(),
+            request.width,
+            request.height
         );
 
         // When progress was last said; see `progress_due`.
@@ -2047,7 +2069,10 @@ fn render_picture(
         }
 
         match encoder.finish() {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                log::info!("export: video pass finished, {} frames written", total_frames);
+                return Ok(());
+            }
             Err(error) => {
                 let component = encoder.component();
                 drop(encoder);

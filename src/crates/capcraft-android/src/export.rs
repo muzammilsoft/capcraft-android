@@ -118,6 +118,12 @@ fn fraction_of(progress: Progress) -> f32 {
     };
     match progress.stage {
         "rendering" => done * 0.9,
+        // KG fork (2026-11-01): the software retry used to map to a flat
+        // 0.9, so the bar jumped to 90% at the retry and then sat there
+        // while the second pass stalled - looking like the export had
+        // almost finished and then failed for nothing. It now moves
+        // with its own frames, from 0% again, like the first pass.
+        "rendering in software" => done * 0.9,
         "mixing audio" => 0.9 + done * 0.06,
         "muxing" => 0.96 + done * 0.04,
         // a stage this bridge does not know: hold where drawing ended
@@ -200,6 +206,7 @@ mod tests {
     fn progress_follows_the_engines_stages() {
         assert_eq!(at(0, 300, "rendering"), 0.0);
         assert!((at(150, 300, "rendering") - 0.45).abs() < 1e-6);
+        assert!((at(150, 300, "rendering in software") - 0.45).abs() < 1e-6);
         let steps = [
             at(299, 300, "rendering"),
             at(0, 300, "mixing audio"),
