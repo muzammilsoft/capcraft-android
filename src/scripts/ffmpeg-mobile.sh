@@ -58,6 +58,7 @@ common=(
   # Nothing external. zlib is part of both platforms' SDKs; bzip2 and
   # lzma are on one and not the other, so neither is taken.
   --enable-zlib --disable-bzlib --disable-lzma
+  --enable-encoder=mpeg4
   --disable-iconv --disable-sdl2 --disable-xlib --disable-libxcb
   --disable-vulkan --disable-opencl --disable-vaapi --disable-vdpau
 )

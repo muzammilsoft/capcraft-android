@@ -55,17 +55,25 @@ pub enum VideoCodec {
     /// VP9 with an alpha layer in a `.webm`: a transparent overlay for a
     /// web page or OBS, a small fraction of ProRes' size. Eight bits.
     Vp9Alpha,
+    /// MPEG-4 Part 2 in an `.mp4`, from FFmpeg's own encoder, not
+    /// MediaCodec: KG fork (2026-11-01), the fallback when every
+    /// MediaCodec encoder on a phone stalls after a few frames. Slower
+    /// and larger than H.264 at the same quality, but it does not use
+    /// the device's MediaCodec at all, so a phone whose MediaCodec
+    /// stalls can still export a playable MP4.
+    Mpeg4,
 }
 
 impl VideoCodec {
     /// Every codec, in the order a menu lists them: the three that make an
     /// ordinary `.mp4`, then the two that keep a transparent frame's alpha.
-    pub const ALL: [VideoCodec; 5] = [
+    pub const ALL: [VideoCodec; 6] = [
         VideoCodec::H264,
         VideoCodec::Hevc,
         VideoCodec::Av1,
         VideoCodec::ProRes4444,
         VideoCodec::Vp9Alpha,
+        VideoCodec::Mpeg4,
     ];
 
     /// The name a document or a request stores.
@@ -76,6 +84,7 @@ impl VideoCodec {
             VideoCodec::Av1 => "av1",
             VideoCodec::ProRes4444 => "prores-4444",
             VideoCodec::Vp9Alpha => "vp9-alpha",
+            VideoCodec::Mpeg4 => "mpeg4",
         }
     }
 
@@ -91,6 +100,7 @@ impl VideoCodec {
                 Some(VideoCodec::ProRes4444)
             }
             "vp9-alpha" | "vp9_alpha" | "vp9alpha" | "vp9 alpha" => Some(VideoCodec::Vp9Alpha),
+            "mpeg4" | "mpeg-4" | "mp4v" => Some(VideoCodec::Mpeg4),
             _ => None,
         }
     }
@@ -103,6 +113,7 @@ impl VideoCodec {
             VideoCodec::Av1 => "AV1",
             VideoCodec::ProRes4444 => "ProRes 4444",
             VideoCodec::Vp9Alpha => "VP9 alpha",
+            VideoCodec::Mpeg4 => "MPEG-4",
         }
     }
 
@@ -119,7 +130,7 @@ impl VideoCodec {
     /// QuickTime's, and VP9's alpha rides in a Matroska block addition.
     pub fn container(self) -> &'static str {
         match self {
-            VideoCodec::H264 | VideoCodec::Hevc | VideoCodec::Av1 => "mp4",
+            VideoCodec::H264 | VideoCodec::Hevc | VideoCodec::Av1 | VideoCodec::Mpeg4 => "mp4",
             VideoCodec::ProRes4444 => "mov",
             VideoCodec::Vp9Alpha => "webm",
         }
@@ -161,6 +172,8 @@ impl VideoCodec {
         match self {
             VideoCodec::ProRes4444 => return &["prores_ks"],
             VideoCodec::Vp9Alpha => return &["libvpx-vp9"],
+            // FFmpeg's own encoder, on every platform, MediaCodec-free.
+            VideoCodec::Mpeg4 => return &["mpeg4"],
             VideoCodec::H264 | VideoCodec::Hevc | VideoCodec::Av1 => {}
         }
         let macos = cfg!(target_os = "macos");
@@ -202,6 +215,7 @@ impl VideoCodec {
             }
             VideoCodec::Av1 => &["libsvtav1", "libaom-av1", "av1_nvenc", "av1_qsv", "av1_amf"],
             VideoCodec::ProRes4444 | VideoCodec::Vp9Alpha => &[],
+            VideoCodec::Mpeg4 => &["mpeg4"],
         }
     }
 
@@ -280,6 +294,7 @@ impl VideoCodec {
             VideoCodec::Av1 => 0.5,
             VideoCodec::ProRes4444 => 40.0,
             VideoCodec::Vp9Alpha => 0.8,
+            VideoCodec::Mpeg4 => 1.4,
         }
     }
 }
@@ -899,6 +914,18 @@ fn open_video(
         // is one per second rounded from a GOP of twelve frames.
         video.set_gop((fps.round().max(1.0) * 2.0) as u32);
     }
+    // MPEG-4 is FFmpeg's own encoder, not steered by a bitrate in the
+    // MediaCodec sense, so give it the target and a two-second GOP
+    // directly, as the MediaCodec block above does for its encoders.
+    if encoder_name == "mpeg4" {
+        let kbps = if cbr || average {
+            options.bitrate_kbps
+        } else {
+            implied_kbps(options.codec, options.crf, width, height, rate)
+        };
+        video.set_bit_rate(kbps as usize * 1000);
+        video.set_gop((fps.round().max(1.0) * 2.0) as u32);
+    }
     // An average, on the context as well as in each encoder's own words:
     // the AV1 encoders read the target and the ceiling from there.
     if average {
@@ -1181,7 +1208,7 @@ fn settled(options: &EncodeOptions) -> EncodeOptions {
             options.color_range = ColorRange::Limited;
         }
         VideoCodec::Vp9Alpha => options.ten_bit = false,
-        VideoCodec::H264 | VideoCodec::Hevc | VideoCodec::Av1 => {}
+        VideoCodec::H264 | VideoCodec::Hevc | VideoCodec::Av1 | VideoCodec::Mpeg4 => {}
     }
     options
 }

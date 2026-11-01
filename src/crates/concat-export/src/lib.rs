@@ -519,7 +519,7 @@ fn codec_by_name<'de, D: serde::Deserializer<'de>>(
     let name = String::deserialize(deserializer)?;
     VideoCodec::parse(&name).ok_or_else(|| {
         serde::de::Error::custom(format!(
-            "unknown codec {name:?}: h264, hevc, av1, prores-4444 or vp9-alpha"
+            "unknown codec {name:?}: h264, hevc, av1, prores-4444, vp9-alpha or mpeg4"
         ))
     })
 }
@@ -1289,16 +1289,53 @@ pub fn render_on(
     // that failed - the disk full, a read error - left a truncated file
     // where the previous export had been (audit 2026-10-09, finding 4).
     let result = (|| -> Result<(), String> {
-        render_picture(
+        // KG fork (2026-11-01), Android only: every MediaCodec encoder
+        // on the Y8p stalls after 4-5 frames, at 720p and at 480p, on a
+        // 59-second cut and on a 13-second text-only cut, while preview
+        // plays smoothly - so the stall is in MediaCodec, not in the
+        // cut. When the picture render fails with that stall, try once
+        // more with MPEG-4, FFmpeg's own encoder, which never touches
+        // MediaCodec. Same MP4 container, same output path, just a
+        // different video codec inside it, slower and larger than
+        // H.264, but a file that actually finishes. Any other failure,
+        // and any platform but Android, keeps the original error.
+        match render_picture(
             request,
             compositor,
             rate,
             total_frames,
             &visible,
-            transitions,
+            transitions.clone(),
             &silent,
             &mut reporter,
-        )?;
+        ) {
+            Ok(()) => {}
+            Err(error) if cfg!(target_os = "android")
+                && request.codec == VideoCodec::H264
+                && (error.contains("took no frame") || error.contains("failed too")) =>
+            {
+                log::warn!("export: H.264 failed with {error}; trying MPEG-4, which does not use MediaCodec");
+                let fallback = ExportRequest {
+                    codec: VideoCodec::Mpeg4,
+                    ..request.clone()
+                };
+                render_picture(
+                    &fallback,
+                    None,
+                    rate,
+                    total_frames,
+                    &visible,
+                    transitions,
+                    &silent,
+                    &mut reporter,
+                )
+                .map_err(|fallback_error| {
+                    format!("{error}; MPEG-4 fallback also failed: {fallback_error}")
+                })?;
+                log::info!("export: MPEG-4 fallback succeeded after the MediaCodec stall");
+            }
+            Err(error) => return Err(error),
+        }
 
         let finished = if sound.is_empty() {
             &silent
