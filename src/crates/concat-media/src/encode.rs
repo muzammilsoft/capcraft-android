@@ -184,6 +184,7 @@ impl VideoCodec {
                 VideoCodec::Hevc => &["hevc_mediacodec"],
                 VideoCodec::Av1 => &["av1_mediacodec"],
                 VideoCodec::ProRes4444 | VideoCodec::Vp9Alpha => &[],
+                VideoCodec::Mpeg4 => &["mpeg4"],
             };
         }
         if cfg!(target_os = "ios") {
@@ -191,6 +192,7 @@ impl VideoCodec {
                 VideoCodec::H264 => &["h264_videotoolbox"],
                 VideoCodec::Hevc => &["hevc_videotoolbox"],
                 VideoCodec::Av1 | VideoCodec::ProRes4444 | VideoCodec::Vp9Alpha => &[],
+                VideoCodec::Mpeg4 => &["mpeg4"],
             };
         }
         match self {
