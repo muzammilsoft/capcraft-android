@@ -141,13 +141,22 @@ fun CaptionTemplatesPanel(vm: EditorViewModel) {
     }
 }
 
-/** The language a caption model hears, as the sheet names it. */
-private fun languageOf(m: SpeechModel): String = when (m.id) {
-    "tiny" -> "Auto detect (fast)"
-    "base" -> "Auto detect"
-    "base.en" -> "English"
+/** A caption model, as the sheet names it. */
+private fun modelOf(m: SpeechModel): String = when (m.id) {
+    "tiny" -> "Tiny (fast)"
+    "base" -> "Base"
+    "base.en" -> "Base (English only)"
+    "small" -> "Small (best)"
     else -> m.label
 }
+
+/** The spoken languages the sheet offers: auto-detect, or a pinned one. */
+private val SPOKEN_LANGUAGES = listOf(
+    null to "Auto detect",
+    "ar" to "Arabic",
+    "zh" to "Simplified Chinese",
+    "en" to "English",
+)
 
 /**
  * Auto captions, laid out as the reference's sheet over a dimmed preview: what is heard, the
@@ -161,6 +170,9 @@ fun AutoCaptionsSheet(vm: EditorViewModel, lyrics: Boolean = false) {
     var models by remember { mutableStateOf<List<SpeechModel>>(emptyList()) }
     var model by remember { mutableIntStateOf(0) }
     var choosing by remember { mutableStateOf(false) }
+    // the spoken language, as an index into SPOKEN_LANGUAGES; null is auto-detect
+    var language by remember { mutableIntStateOf(0) }
+    var choosingLanguage by remember { mutableStateOf(false) }
     var look by remember { mutableIntStateOf(0) }
     var job by remember { mutableStateOf<Pair<String, Float>?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
@@ -171,7 +183,7 @@ fun AutoCaptionsSheet(vm: EditorViewModel, lyrics: Boolean = false) {
 
     LaunchedEffect(refresh) {
         models = withContext(Threads.thumbnails) {
-            runCatching { captionModels().filter { it.id == "tiny" || it.id == "base" || it.id == "base.en" } }.getOrDefault(emptyList())
+            runCatching { captionModels().filter { it.id == "tiny" || it.id == "base" || it.id == "base.en" || it.id == "small" } }.getOrDefault(emptyList())
         }
     }
     DisposableEffect(Unit) { onDispose { if (job != null) runCatching { cancelSpeech() } } }
@@ -231,9 +243,10 @@ fun AutoCaptionsSheet(vm: EditorViewModel, lyrics: Boolean = false) {
         }
         val s = vm.session ?: return
         job = "Reading the sound" to 0f
+        val code = SPOKEN_LANGUAGES.getOrNull(language)?.first
         scope.launch(Threads.commands) {
             runCatching {
-                if (lyrics) s.autoLyrics(m.id, replace && existing > 0, listener) else s.autoCaptions(m.id, replace && existing > 0, listener)
+                if (lyrics) s.autoLyrics(m.id, replace && existing > 0, code, listener) else s.autoCaptions(m.id, replace && existing > 0, code, listener)
             }
                 .onFailure { e -> launch(Dispatchers.Main) { job = null; vm.message = e.userMessage } }
         }
@@ -273,18 +286,46 @@ fun AutoCaptionsSheet(vm: EditorViewModel, lyrics: Boolean = false) {
             Spacer(Modifier.height(12.dp))
             Card {
                 val m = models.getOrNull(model)
-                SheetRow(LucideIcons.Languages, "Spoken language", m?.let(::languageOf) ?: "…", chevron = true, open = choosing) { choosing = !choosing }
+                SheetRow(LucideIcons.Languages, "Model", m?.let(::modelOf) ?: "…", chevron = true, open = choosing) { choosing = !choosing }
                 if (choosing) {
                     models.forEachIndexed { i, option ->
                         Row(
-                            Modifier.fillMaxWidth().height(44.dp).clickable { model = i; choosing = false }.padding(start = 48.dp, end = 14.dp),
+                            Modifier.fillMaxWidth().height(44.dp).clickable {
+                                model = i
+                                choosing = false
+                                // an English-only model hears English only, so it pins English
+                                if (option.id.endsWith(".en")) language = SPOKEN_LANGUAGES.indexOfFirst { it.first == "en" }
+                            }.padding(start = 48.dp, end = 14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(languageOf(option), style = Type.Body.copy(color = if (i == model) Palette.Accent else Palette.Text), modifier = Modifier.weight(1f))
+                            Text(modelOf(option), style = Type.Body.copy(color = if (i == model) Palette.Accent else Palette.Text), modifier = Modifier.weight(1f))
                             Text(
                                 mb(option.sizeBytes) + if (option.downloaded) "" else "  ↓",
                                 style = Type.Small.copy(color = Palette.TextSecondary),
                             )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Card {
+                SheetRow(LucideIcons.Languages, "Spoken language", SPOKEN_LANGUAGES.getOrNull(language)?.second ?: "…", chevron = true, open = choosingLanguage) { choosingLanguage = !choosingLanguage }
+                if (choosingLanguage) {
+                    SPOKEN_LANGUAGES.forEachIndexed { i, option ->
+                        Row(
+                            Modifier.fillMaxWidth().height(44.dp).clickable {
+                                language = i
+                                choosingLanguage = false
+                                // Arabic and Chinese need a multilingual model, not an English-only one
+                                val code = option.first
+                                val current = models.getOrNull(model)
+                                if ((code == "ar" || code == "zh") && current?.id?.endsWith(".en") == true) {
+                                    models.indexOfFirst { it.id == "base" }.takeIf { it >= 0 }?.let { model = it }
+                                }
+                            }.padding(start = 48.dp, end = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(option.second, style = Type.Body.copy(color = if (i == language) Palette.Accent else Palette.Text), modifier = Modifier.weight(1f))
                         }
                     }
                 }

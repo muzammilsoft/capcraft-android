@@ -356,6 +356,12 @@ pub struct TranscribeRequest {
     pub window: f64,
     /// Which model to use, e.g. "base.en".
     pub model_id: String,
+    /// The spoken language to hear, as a whisper code ("ar", "zh", "en");
+    /// `None` is auto-detect on a multilingual model, English on an
+    /// English-only one. A pinned language is honoured only on a
+    /// multilingual model: an English-only model is always told "en",
+    /// because asking it for another language hears nonsense.
+    pub language: Option<String>,
 }
 
 struct LoadedModel {
@@ -569,12 +575,18 @@ impl Transcriber {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(threads as i32);
         // The language is whisper's to hear, when it can hear more than
-        // one: a multilingual model detects it from the first window. An
+        // one: a multilingual model detects it from the first window,
+        // unless the caller pinned one ("ar", "zh", "en"). An
         // English-only model asked for "auto" still runs the detection,
         // over a vocabulary it was never trained on, and "hears" Thai at
-        // one percent - so it is simply told English.
+        // one percent - so it is simply told English, pinned or not.
+        let pinned = request
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|code| !code.is_empty());
         params.set_language(Some(if context.is_multilingual() {
-            "auto"
+            pinned.unwrap_or("auto")
         } else {
             "en"
         }));
@@ -689,6 +701,7 @@ mod tests {
                     source_start: 0.0,
                     window,
                     model_id,
+                    language: None,
                 },
                 |_| {},
             )
@@ -782,6 +795,7 @@ mod real_audio {
             source_start: 0.0,
             window: 30.0,
             model_id: "tiny.en".to_owned(),
+            language: None,
         };
         let segments = transcriber
             .transcribe(&dirs, &request, |stage| eprintln!("{stage:?}"))

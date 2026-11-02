@@ -226,7 +226,7 @@ fun SpeechPanel(vm: EditorViewModel, captions: Boolean, clipId: String?) {
                                 if (captions) {
                                     job = Job.Running("Reading the sound", 0f)
                                     scope.launch(Threads.commands) {
-                                        runCatching { s.autoCaptions(target.id, replace && existing > 0, listener) }
+                                        runCatching { s.autoCaptions(target.id, replace && existing > 0, null, listener) }
                                             .onFailure { e -> launch(Dispatchers.Main) { job = Job.Idle; vm.message = e.userMessage } }
                                     }
                                 } else {

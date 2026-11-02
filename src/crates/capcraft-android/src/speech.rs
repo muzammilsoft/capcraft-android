@@ -70,6 +70,7 @@ pub trait TranscriptListener: Send + Sync {
 fn heard(
     session: &MobileSession,
     model_id: &str,
+    language: Option<String>,
 ) -> Result<Vec<(f64, f64, TranscribeRequest)>, MobileError> {
     session.with_session(|session| {
         let project = session.project();
@@ -99,6 +100,7 @@ fn heard(
                         source_start: clip.source_start,
                         window: clip.duration * clip.speed,
                         model_id: model_id.to_owned(),
+                        language: language.clone(),
                     },
                 ))
             })
@@ -301,14 +303,17 @@ fn caption_style(text: &str) -> TextStyle {
 impl MobileSession {
     /// Captions from what is said in every audible clip, with `model_id`,
     /// placed as titles on a text row of their own: one per phrase, at the
-    /// time it is said. Runs on a thread of its own; one undo step.
+    /// time it is said. `language` pins what is spoken ("ar", "zh",
+    /// "en"); `None` is auto-detect on a multilingual model. Runs on a
+    /// thread of its own; one undo step.
     pub fn auto_captions(
         self: Arc<Self>,
         model_id: String,
         replace: bool,
+        language: Option<String>,
         listener: Arc<dyn SpeechListener>,
     ) -> Result<(), MobileError> {
-        self.caption(model_id, replace, false, listener)
+        self.caption(model_id, replace, false, language, listener)
     }
 
     /// Lyrics: [`MobileSession::auto_captions`] of what is sung, each
@@ -318,9 +323,10 @@ impl MobileSession {
         self: Arc<Self>,
         model_id: String,
         replace: bool,
+        language: Option<String>,
         listener: Arc<dyn SpeechListener>,
     ) -> Result<(), MobileError> {
-        self.caption(model_id, replace, true, listener)
+        self.caption(model_id, replace, true, language, listener)
     }
 }
 
@@ -332,10 +338,11 @@ impl MobileSession {
         model_id: String,
         replace: bool,
         lyrics: bool,
+        language: Option<String>,
         listener: Arc<dyn SpeechListener>,
     ) -> Result<(), MobileError> {
         let dirs = context()?.dirs.clone();
-        let mut windows = heard(&self, &model_id)?;
+        let mut windows = heard(&self, &model_id, language)?;
         if windows.is_empty() {
             return Err(MobileError::Failed(
                 "There is no sound on the timeline to caption.".to_owned(),
@@ -436,7 +443,7 @@ impl MobileSession {
         listener: Arc<dyn TranscriptListener>,
     ) -> Result<(), MobileError> {
         let dirs = context()?.dirs.clone();
-        let windows = heard(&self, &model_id)?;
+        let windows = heard(&self, &model_id, None)?;
         if windows.is_empty() {
             return Err(MobileError::Failed(
                 "There is no sound on the timeline to transcribe.".to_owned(),
