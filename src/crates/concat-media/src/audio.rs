@@ -637,7 +637,7 @@ pub fn mix_to_file_with(
         // Phase 1 preset, when the exporter set one; otherwise the
         // existing 192 kbps, so every old caller sounds as it did.
         let kbps = MIX_AUDIO_KBPS.load(std::sync::atomic::Ordering::SeqCst);
-        audio.set_bit_rate(if kbps > 0 { kbps * 1000 } else { 192_000 });
+        audio.set_bit_rate(if kbps > 0 { (kbps as usize) * 1000 } else { 192_000 });
     }
     audio.set_time_base(ffmpeg::Rational::new(1, MIX_RATE as i32));
     if global_header {
