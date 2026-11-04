@@ -175,7 +175,8 @@ pub fn instantiate_template(
             },
         })
         .collect();
-    let info = templates::instantiate(&template_path, &context.projects, &name, fills)?;
+    let projects = context.projects.to_string_lossy().into_owned();
+    let info = templates::instantiate(&template_path, &projects, &name, fills)?;
     Ok(info.path)
 }
 
