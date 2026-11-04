@@ -115,16 +115,18 @@ jobs:
           workspaces: src
           key: release-android
 
-      # KG fork (2026-11-01): the fork has no release signing secret,
-      # and KG asked for a release APK signed with any test key, to
-      # share with friends as a plain APK from the Releases page,
-      # not a debug build from an artifact zip. When no secret key
-      # is present, generate a throwaway test key here, in the run
-      # only: it is never committed, never uploaded, and is deleted
-      # with the runner, so a later build with a fresh test key will
-      # require uninstalling the old version before installing the
-      # new one. A real, kept release key still wins whenever the
-      # secret is set.
+      # KG fork (2026-11-04, Phase 1, stable test key): test builds
+      # are signed with ONE test keystore, kept ONLY as the GitHub
+      # Actions secret CAPCRAFT_KEYSTORE_BASE64 (test-only, never a
+      # real release key, never in the repo), so future test builds
+      # update without uninstall and keep app data. The next build
+      # after the switch still needs one final uninstall, because
+      # 0.0.9-beta was signed with a different, random test key.
+      # A tag build with no secret FAILS here on purpose: silently
+      # generating a fresh random key would break update
+      # compatibility again, which is exactly what the stable key
+      # was approved to stop. Manual dry runs without a secret still
+      # use the debug key, as before.
       - name: Release key
         env:
           KEYSTORE_BASE64: ${{ secrets.CAPCRAFT_KEYSTORE_BASE64 }}
@@ -133,12 +135,8 @@ jobs:
             printf '%s' "$KEYSTORE_BASE64" | base64 -d >"$RUNNER_TEMP/release.p12"
             echo "CAPCRAFT_KEYSTORE=$RUNNER_TEMP/release.p12" >>"$GITHUB_ENV"
           elif [ "$GITHUB_REF_TYPE" = tag ]; then
-            echo "::warning::No release key secret: signing this tag build with a generated test key, discarded after the run"
-            keytool -genkeypair -keystore "$RUNNER_TEMP/test.p12" -storetype PKCS12 \
-              -alias capcraft-test -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass capcraft-test -keypass capcraft-test \
-              -dname "CN=CapCraft Test, O=CapCraft Test"
-            echo "CAPCRAFT_KEYSTORE=$RUNNER_TEMP/test.p12" >>"$GITHUB_ENV"
+            echo "::error::No CAPCRAFT_KEYSTORE_BASE64 secret: a tag build must use the stable test key, not a fresh random one"
+            exit 1
           else
             echo "::warning::No release key: this dry run is signed with the debug key"
           fi

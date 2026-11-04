@@ -3,6 +3,7 @@ package io.github.artcraftandroid.capcraft.ui.editor
 import android.app.Application
 import android.net.Uri
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -85,6 +86,8 @@ sealed interface Panel {
     data object CustomCutout : Panel
     data object ShapeStyle : Panel
     data object CaptionTemplates : Panel
+    /** Phase 1: project templates, backup and template files. */
+    data object Templates : Panel
     data object Collage : Panel
     data object Relight : Panel
     data object Lyrics : Panel
@@ -588,6 +591,12 @@ class EditorViewModel(app: Application, val path: String) : AndroidViewModel(app
     var exportFps by mutableStateOf(30)
     /** The bitrate chosen, megabits a second, or null for the one suggested for the video. */
     var exportMbps: Int? by mutableStateOf(null)
+    /** A Phase 1 export preset ("small", "balanced" or "quality"), or null for custom settings. */
+    var exportPreset: String? by mutableStateOf(null)
+    /** A preset's exact video bitrate in kbps, or null when the slider/suggestion decides it. */
+    var exportBitrateKbps: Int? by mutableStateOf(null)
+    /** A preset's audio bitrate in kbps, or 0 to keep the mixer's default (192 kbps). */
+    var exportAudioKbps by mutableIntStateOf(0)
     /** The export settings sheet is down. */
     var exportSheet by mutableStateOf(false)
     /** The export makes a GIF rather than a video. */

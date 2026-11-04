@@ -128,6 +128,7 @@ impl Consolidation {
             ten_bit: hdr,
             rate_mode: Default::default(),
             bitrate_kbps: 0,
+            audio_kbps: 0,
             color_range: Default::default(),
             color_space: self.video.color_space,
             hdr,

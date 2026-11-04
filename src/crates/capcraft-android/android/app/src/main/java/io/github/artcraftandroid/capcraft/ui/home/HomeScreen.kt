@@ -88,6 +88,8 @@ import io.github.artcraftandroid.capcraft.ui.MaterialIcons
 import io.github.artcraftandroid.capcraft.ui.Palette
 import io.github.artcraftandroid.capcraft.ui.Type
 import io.github.artcraftandroid.capcraft.ui.common.Toast
+import io.github.artcraftandroid.capcraft.ui.common.exportBackup
+import io.github.artcraftandroid.capcraft.ui.common.restoreBackup
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1034,6 +1036,16 @@ private fun MeTab(onLicences: () -> Unit, onAbout: () -> Unit, onCleared: (Strin
     val version = remember { appVersion(context) }
     var cache by remember { mutableStateOf<Long?>(null) }
     var clearing by remember { mutableStateOf(false) }
+    // Phase 1: backup without opening a project, so it can be done
+    // right before an uninstall. Export first, uninstall second,
+    // restore after reinstall, from this same Settings tab.
+    val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch(Threads.commands) {
+            val result = runCatching { restoreBackup(context, uri) }.getOrElse { it.message ?: "Restore failed" }
+            withContext(kotlinx.coroutines.Dispatchers.Main) { onCleared(result) }
+        }
+    }
     LaunchedEffect(Unit) { cache = withContext(Threads.commands) { cacheSize(context) } }
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1041,6 +1053,13 @@ private fun MeTab(onLicences: () -> Unit, onAbout: () -> Unit, onCleared: (Strin
         }
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
             SettingRow("Clear cache", cache?.let(::size) ?: "") { clearing = true }
+            SettingRow("Export backup", null) {
+                scope.launch(Threads.commands) {
+                    val result = runCatching { exportBackup(context) }.getOrElse { it.message ?: "Backup failed" }
+                    withContext(kotlinx.coroutines.Dispatchers.Main) { onCleared(result) }
+                }
+            }
+            SettingRow("Restore backup", null) { restore.launch(arrayOf("application/zip", "application/octet-stream")) }
             SettingRow("Licences", null, onLicences)
             SettingRow("About CapCraft", null, onAbout)
             SettingRow("Version", version, null)

@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -50,8 +51,10 @@ import kotlin.math.roundToInt
 private val RESOLUTIONS = listOf(480, 720, 1080, 1440, 2160)
 private val RESOLUTION_LABELS = listOf("480p", "720p", "1080p", "2k", "4k")
 private val FRAME_RATES = listOf(24, 25, 30, 50, 60)
-/** The bitrate stops, megabits a second. */
-private val MBPS = listOf(5, 10, 20, 50, 100)
+/** The bitrate stops, megabits a second. KG fork (2026-11-04, Phase 1):
+ * down to 1 Mbps, from the old 5 Mbps floor, so a long phone clip can
+ * export small; never clamped below 1. */
+private val MBPS = listOf(1, 2, 3, 5, 10, 20)
 private val GIF_SIZES = listOf(240, 320, 480)
 private val GIF_RATES = listOf(8, 10, 15)
 
@@ -62,9 +65,32 @@ fun exportResolutionOf(vm: EditorViewModel): Int {
     return vm.exportResolution ?: RESOLUTIONS.lastOrNull { it <= max(short, 480) } ?: 1080
 }
 
-/** The bitrate an export uses, kilobits a second: the one chosen, or the one suggested for its size. */
+/** The bitrate an export uses, kilobits a second: a preset's exact rate
+ * first, then the one chosen on the slider, then the one suggested for
+ * its size. A preset overrides the suggestion clearly, never silently. */
 fun exportKbps(vm: EditorViewModel, width: Int, height: Int): Int =
-    vm.exportMbps?.let { it * 1000 } ?: suggestedBitrateKbps(width.toUInt(), height.toUInt(), vm.exportFps.toUInt()).toInt()
+    vm.exportBitrateKbps ?: vm.exportMbps?.let { it * 1000 } ?: suggestedBitrateKbps(width.toUInt(), height.toUInt(), vm.exportFps.toUInt()).toInt()
+
+/** The audio bitrate an export uses, kilobits a second: a preset's rate, or 0 for the mixer's default. */
+fun exportAudioKbps(vm: EditorViewModel): Int = vm.exportAudioKbps
+
+/** A Phase 1 export preset: resolution, frame rate, video and audio bitrate. */
+private data class ExportPreset(val id: String, val label: String, val detail: String, val resolution: Int, val fps: Int, val videoKbps: Int, val audioKbps: Int)
+
+private val EXPORT_PRESETS = listOf(
+    ExportPreset("small", "Small", "720p · 24fps · 1.5 Mbps · audio 96k", 720, 24, 1500, 96),
+    ExportPreset("balanced", "Balanced", "1080p · 24fps · 2 Mbps · audio 96k", 1080, 24, 2000, 96),
+    ExportPreset("quality", "Quality", "1080p · 30fps · 3 Mbps · audio 128k", 1080, 30, 3000, 128),
+)
+
+private fun applyPreset(vm: EditorViewModel, preset: ExportPreset) {
+    vm.exportPreset = preset.id
+    vm.exportResolution = preset.resolution
+    vm.exportFps = preset.fps
+    vm.exportBitrateKbps = preset.videoKbps
+    vm.exportAudioKbps = preset.audioKbps
+    vm.exportMbps = null
+}
 
 /**
  * The export settings, dropped down from the top over the dimmed editor: Video or GIF, then the
@@ -130,9 +156,37 @@ fun ExportSheet(vm: EditorViewModel, onExport: () -> Unit) {
                 )
                 return@Column
             }
+            // Phase 1 presets: one tap sets resolution, frame rate and
+            // bitrates together. Any slider moved by hand clears the
+            // preset, so the sheet never shows a preset that is not
+            // what the export will actually use.
+            Text(
+                "Preset: ${vm.exportPreset ?: "Custom"}",
+                style = Type.Small.copy(fontSize = 13.sp),
+                modifier = Modifier.padding(start = 16.dp, top = 4.dp),
+            )
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (preset in EXPORT_PRESETS) {
+                    val selected = vm.exportPreset == preset.id
+                    Box(
+                        Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(8.dp))
+                            .background(if (selected) Palette.Accent else Palette.Chip)
+                            .clickable { applyPreset(vm, preset) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(preset.label, style = Type.BodyStrong.copy(color = if (selected) Palette.OnAccent else Palette.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold))
+                            Text(preset.detail, style = Type.Small.copy(color = if (selected) Palette.OnAccent else Palette.Text, fontSize = 10.sp))
+                        }
+                    }
+                }
+            }
             val res = exportResolutionOf(vm)
             val r = RESOLUTIONS.indexOf(res).coerceAtLeast(0)
             SettingSlider("Resolution", RESOLUTION_HINTS[r], RESOLUTION_LABELS, r.toFloat()) {
+                vm.exportPreset = null
+                vm.exportBitrateKbps = null
+                vm.exportAudioKbps = 0
                 vm.exportResolution = RESOLUTIONS[it.roundToInt().coerceIn(0, RESOLUTIONS.size - 1)]
             }
             if (vm.exportPhoto) {
@@ -146,6 +200,9 @@ fun ExportSheet(vm: EditorViewModel, onExport: () -> Unit) {
             }
             val f = FRAME_RATES.indexOf(vm.exportFps).coerceAtLeast(2)
             SettingSlider("Frame rate", if (vm.exportFps >= 50) "Very smooth motion" else "Steady, everyday motion", FRAME_RATES.map { "$it" }, f.toFloat()) {
+                vm.exportPreset = null
+                vm.exportBitrateKbps = null
+                vm.exportAudioKbps = 0
                 vm.exportFps = FRAME_RATES[it.roundToInt().coerceIn(0, FRAME_RATES.size - 1)]
             }
             val dims = exportSize(t.width, t.height, res.toUInt())
@@ -153,12 +210,16 @@ fun ExportSheet(vm: EditorViewModel, onExport: () -> Unit) {
             val mbps = vm.exportMbps ?: suggested
             SettingSlider("Bitrate (Mbps)", "Suggested for this video: $suggested", MBPS.map { "$it" }, mbpsToPosition(mbps), continuous = true) {
                 val chosen = positionToMbps(it)
+                vm.exportPreset = null
+                vm.exportBitrateKbps = null
+                vm.exportAudioKbps = 0
                 // the suggestion is sticky, so it can be found again
                 vm.exportMbps = if (abs(chosen - suggested) <= max(1, suggested / 10)) null else chosen
             }
             Divider()
             val kbps = exportKbps(vm, dims[0].toInt(), dims[1].toInt())
-            val mb = (kbps + 128) / 8.0 / 1000.0 * (t.durationUs / 1e6)
+            val audioKbps = if (vm.exportAudioKbps > 0) vm.exportAudioKbps else 192
+            val mb = (kbps + audioKbps) / 8.0 / 1000.0 * (t.durationUs / 1e6)
             Text(
                 "Estimated file size: %s MB".format(if (mb < 10) "%.1f".format(mb) else "${mb.roundToInt()}"),
                 style = Type.Small.copy(fontSize = 13.sp),

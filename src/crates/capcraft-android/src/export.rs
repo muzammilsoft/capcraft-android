@@ -37,6 +37,9 @@ pub struct ExportSettings {
     pub fps: u32,
     /// Target bitrate in kbps; 0 lets the encoder choose for the size.
     pub bitrate_kbps: u32,
+    /// Target audio bitrate in kbps; 0 keeps the mixer's default
+    /// (192 kbps). Phase 1 presets pass 96 or 128 here.
+    pub audio_kbps: u32,
     /// H.265 rather than H.264.
     pub hevc: bool,
     /// The file to write.
@@ -159,6 +162,7 @@ impl MobileSession {
                 // the target to hold; the phone's encoder holds it in VBR
                 rate_mode: RateMode::Cbr,
                 bitrate_kbps: bitrate,
+                audio_kbps: settings.audio_kbps,
                 color_range: Default::default(),
                 hdr: false,
             };

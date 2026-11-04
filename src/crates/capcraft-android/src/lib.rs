@@ -58,6 +58,7 @@ pub mod slowmo;
 pub mod speech;
 pub mod stabilize;
 pub mod subtitles;
+pub mod templates;
 pub mod text_tools;
 pub mod tracking;
 pub mod voice;

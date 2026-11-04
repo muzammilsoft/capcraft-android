@@ -457,6 +457,11 @@ pub struct ExportRequest {
     /// "not set" and the encoder falls back to VBR.
     #[serde(default)]
     pub bitrate_kbps: u32,
+    /// Target audio bitrate in kbps for the mixed track, when the
+    /// export sheet sets one (Phase 1 presets: 96 or 128). Zero means
+    /// "not set" and the mixer keeps its existing default.
+    #[serde(default)]
+    pub audio_kbps: u32,
     /// The levels the file is written in and tagged with, by name:
     /// "limited" (16-235, what every player expects) or "full" (0-255).
     /// Limited when a request does not say.
@@ -1312,7 +1317,9 @@ pub fn render_on(
             Ok(()) => {}
             Err(error) if cfg!(target_os = "android")
                 && request.codec == VideoCodec::H264
-                && (error.contains("took no frame") || error.contains("failed too")) =>
+                && (error.contains("took no frame")
+                    || error.contains("failed too")
+                    || error.contains("mediacodec encoder open failed")) =>
             {
                 log::warn!("export: H.264 failed with {error}; trying MPEG-4, which does not use MediaCodec");
                 let fallback = ExportRequest {
@@ -1344,6 +1351,7 @@ pub fn render_on(
             reporter.emit(0, total_frames, "mixing audio");
             let mix: Vec<AudioClip> = sound.iter().flat_map(|clip| audio_pieces(clip)).collect();
             let buses = audio_buses(&resolved);
+            audio::set_mix_audio_kbps(request.audio_kbps);
             audio::mix_to_file_with(&mix, &buses, timeline_end.as_f64(), &mixed)
                 .map_err(|error| error.to_string())?;
 
@@ -2148,19 +2156,16 @@ fn again_in_software(
     frame: i64,
     total: i64,
 ) -> Result<(), String> {
-    // KG fork (2026-11-01): the 0.0.5-beta export log proved the c2
-    // software encoder stalls at frame 0 on the Y8p, after the hardware
-    // encoder stalled at frame 4 - so the one software retry is not
-    // enough. H.264 is the only codec with two software components,
-    // c2 then OMX, so a stall on c2 gets one more pass, on OMX, with
-    // c2 excluded. A stall on OMX, or on anything else, ends the
-    // export: there is no fourth encoder to try.
+    // KG fork (2026-11-04, binding): the Google encoder is removed, so
+    // there is no third MediaCodec component after c2. A stall on c2,
+    // already on the software retry, ends the MediaCodec chain here;
+    // the export-level MPEG-4 fallback (below) is the next step, not
+    // another MediaCodec component. Do NOT re-add OMX.google here.
     if options.software_only && component == Some("c2.android.avc.encoder") {
-        log::warn!(
-            "export: {error}, {frame} frames of {total} in; starting again on the other software encoder, without component {component:?}"
+        log::error!(
+            "export: {error}, {frame} frames of {total} in; c2 stalled and no Google encoder is allowed, so no more MediaCodec encoders to try"
         );
-        options.exclude_component = component;
-        return Ok(());
+        return Err(failed_encoding(error, options));
     }
     if options.software_only || !matches!(error, concat_media::Error::Stalled { .. }) {
         // The final failure was missing from the 0.0.5-beta log: the
@@ -2758,6 +2763,7 @@ pub fn preview_plan(
         ten_bit: false,
         rate_mode: RateMode::Vbr,
         bitrate_kbps: 0,
+        audio_kbps: 0,
         color_range: concat_media::ColorRange::Limited,
         color_space,
         hdr: false,
@@ -3732,6 +3738,7 @@ mod tests {
             ten_bit: false,
             rate_mode: RateMode::Vbr,
             bitrate_kbps: 0,
+            audio_kbps: 0,
             color_range: concat_media::ColorRange::Limited,
             color_space: ColorSpace::Sdr,
             hdr: false,
@@ -3814,6 +3821,7 @@ mod tests {
             ten_bit: false,
             rate_mode: RateMode::Vbr,
             bitrate_kbps: 0,
+            audio_kbps: 0,
             color_range: concat_media::ColorRange::Limited,
             color_space: ColorSpace::Sdr,
             hdr: false,
@@ -3917,6 +3925,7 @@ mod tests {
             ten_bit: false,
             rate_mode: RateMode::Vbr,
             bitrate_kbps: 0,
+            audio_kbps: 0,
             color_range: concat_media::ColorRange::Limited,
             color_space: ColorSpace::Sdr,
             hdr: false,
@@ -4058,14 +4067,12 @@ mod tests {
         assert!(component_first.software_only);
         assert_eq!(component_first.exclude_component, Some("c2.android.avc.encoder"));
 
-        // KG fork 2026-11-01: a stall on c2, already on the software
-        // retry, goes again once more, on OMX - the other component -
-        // and a stall on OMX ends it.
-        again_in_software(&stall(false), &mut component_first, Some("c2.android.avc.encoder"), 0, 480)
-            .expect("a c2 stall on the software retry goes again on OMX");
-        assert_eq!(component_first.exclude_component, Some("c2.android.avc.encoder"));
-        let error = again_in_software(&stall(false), &mut component_first, Some("OMX.google.h264.encoder"), 0, 480)
-            .expect_err("an OMX stall ends the export");
+        // KG fork 2026-11-04: a stall on c2, already on the software
+        // retry, ENDS the MediaCodec chain - the Google encoder is
+        // removed, so there is no other component to go again on, and
+        // the export-level MPEG-4 fallback is the next step.
+        let error = again_in_software(&stall(false), &mut component_first, Some("c2.android.avc.encoder"), 0, 480)
+            .expect_err("a c2 stall on the software retry ends the MediaCodec chain");
         assert!(error.contains("failed too"), "{error}");
 
         // A failure that is not a stall is said as it always was.

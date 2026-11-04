@@ -68,6 +68,7 @@ import io.github.artcraftandroid.capcraft.ui.LucideIcons
 import io.github.artcraftandroid.capcraft.ui.Palette
 import io.github.artcraftandroid.capcraft.ui.Type
 import io.github.artcraftandroid.capcraft.ui.editor.EditorViewModel
+import io.github.artcraftandroid.capcraft.ui.editor.exportAudioKbps
 import io.github.artcraftandroid.capcraft.ui.editor.exportKbps
 import io.github.artcraftandroid.capcraft.ui.editor.exportResolutionOf
 import java.io.File
@@ -182,9 +183,13 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                 if (gif) {
                     startGifExport(s, GifSettings(out, vm.gifSize.toUInt(), vm.gifFps.toUInt()), listener)
                 } else {
+                    // Phase 1: write the native encoder list before the
+                    // export starts, so the log view can show it even
+                    // when the export itself never reaches the engine.
+                    writeNativeEncoderList(appContext)
                     startExport(
                         s,
-                        ExportSettings(res.toUInt(), vm.exportFps.toUInt(), kbps.toUInt(), false, out),
+                        ExportSettings(res.toUInt(), vm.exportFps.toUInt(), kbps.toUInt(), exportAudioKbps(vm).toUInt(), false, out),
                         listener,
                     )
                 }
@@ -438,21 +443,53 @@ private fun publish(context: Context, file: File): Uri? = runCatching {
  * the export, its encoder, its GPU or a failure, capped at 300 lines so
  * the screen stays readable.
  */
+/**
+ * Phase 1 native encoder diagnostics: the phone's own MediaCodec
+ * encoder list, through Android's API (not Gbox, not FFmpeg's wrapper),
+ * written to a file the export log view can show and the user can
+ * share. Names, MIME type, and hardware vs software, for video/avc
+ * first, then every other video encoder on the phone.
+ */
+private fun writeNativeEncoderList(context: Context) {
+    runCatching {
+        val folder = File(context.filesDir, "engine/logs").apply { mkdirs() }
+        val name = "native-encoders-" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".txt"
+        val lines = mutableListOf<String>()
+        lines.add("native encoders (Android MediaCodecList, Phase 1 order: OMX.hisi first, c2 second, MPEG-4 last, no Google encoder):")
+        val codecs = android.media.MediaCodecList(android.media.MediaCodecList.ALL_CODECS).codecInfos
+            .filter { it.isEncoder }
+        val avc = codecs.filter { it.supportedTypes.contains("video/avc") }
+        val others = codecs.filter { !it.supportedTypes.contains("video/avc") && it.supportedTypes.any { type -> type.startsWith("video/") } }
+        for (info in avc + others) {
+            val hardware = if (android.os.Build.VERSION.SDK_INT >= 29) info.isHardwareAccelerated else null
+            val software = if (android.os.Build.VERSION.SDK_INT >= 29) info.isSoftwareOnly else null
+            lines.add("native-encoder: ${info.name} types=${info.supportedTypes.joinToString(",")} hardware=$hardware softwareOnly=$software vendor=${info.isVendor}")
+        }
+        if (lines.size == 1) lines.add("native-encoder: none found")
+        File(folder, name).writeText(lines.joinToString("\n"))
+    }
+}
+
 private fun loadExportLog(context: Context): String {
     return runCatching {
         val folder = File(context.filesDir, "engine/logs")
-        val files = folder.listFiles { f -> f.name.startsWith("concat-") && f.name.endsWith(".log") }
-            ?.sortedByDescending { it.name } ?: return@runCatching "No engine log folder found."
-        val latest = files.firstOrNull() ?: return@runCatching "No engine log file found."
-        val lines = latest.readLines()
-        val kept = mutableListOf<String>()
-        kept.addAll(lines.take(3))
-        val wanted = listOf("export", "encoder", "mediacodec", "would not open", "stalled", "starting again", "rendering", "GPU", "compositor", "failed", "panic")
-        for (line in lines) {
-            if (wanted.any { line.contains(it, ignoreCase = true) }) kept.add(line)
-            if (kept.size >= 300) break
-        }
-        if (kept.isEmpty()) "No export lines in ${latest.name}." else kept.joinToString("\n")
+        val native = folder.listFiles { f -> f.name.startsWith("native-encoders-") && f.name.endsWith(".txt") }
+            ?.sortedByDescending { it.name }?.firstOrNull()?.readText()
+        val engine = runCatching {
+            val files = folder.listFiles { f -> f.name.startsWith("concat-") && f.name.endsWith(".log") }
+                ?.sortedByDescending { it.name } ?: return@runCatching "No engine log folder found."
+            val latest = files.firstOrNull() ?: return@runCatching "No engine log file found."
+            val lines = latest.readLines()
+            val kept = mutableListOf<String>()
+            kept.addAll(lines.take(3))
+            val wanted = listOf("export", "encoder", "mediacodec", "would not open", "stalled", "starting again", "rendering", "GPU", "compositor", "failed", "panic")
+            for (line in lines) {
+                if (wanted.any { line.contains(it, ignoreCase = true) }) kept.add(line)
+                if (kept.size >= 300) break
+            }
+            if (kept.isEmpty()) "No export lines in ${latest.name}." else kept.joinToString("\n")
+        }.getOrElse { "Could not read the export log: ${it.message}" }
+        if (native != null) "$native\n\n$engine" else engine
     }.getOrElse { "Could not read the export log: ${it.message}" }
 }
 

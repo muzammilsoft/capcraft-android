@@ -565,6 +565,20 @@ fn opus_encoder() -> Result<(&'static str, Sample)> {
 /// `.ogg` or `.mka` one, AAC otherwise, at 48 kHz stereo.
 ///
 /// Every clip's file must contain an audio stream; see [`mix_graph`].
+/// KG fork (2026-11-04, Phase 1): the audio bitrate an export preset
+/// asks for, in kbps, set by the exporter just before it mixes and read
+/// by [`mix_to_file_with`]. A static, not a new parameter, so the twenty
+/// existing `mix_to_file_with` call sites do not all change in one build;
+/// exports are single-flight, so one value at a time is the whole story.
+/// Zero (the default) keeps the mixer's existing 192 kbps. Phase 2
+/// should pass this through `mix_to_file_with` properly instead.
+static MIX_AUDIO_KBPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Sets the audio bitrate for the next mix; see [`MIX_AUDIO_KBPS`].
+pub fn set_mix_audio_kbps(kbps: u32) {
+    MIX_AUDIO_KBPS.store(kbps, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub fn mix_to_file(clips: &[AudioClip], duration: f64, destination: &Path) -> Result<()> {
     mix_to_file_with(clips, &[], duration, destination)
 }
@@ -620,7 +634,10 @@ pub fn mix_to_file_with(
     audio.set_format(mix_format);
     audio.set_ch_layout(ChannelLayout::STEREO);
     if !wav {
-        audio.set_bit_rate(192_000);
+        // Phase 1 preset, when the exporter set one; otherwise the
+        // existing 192 kbps, so every old caller sounds as it did.
+        let kbps = MIX_AUDIO_KBPS.load(std::sync::atomic::Ordering::SeqCst);
+        audio.set_bit_rate(if kbps > 0 { kbps * 1000 } else { 192_000 });
     }
     audio.set_time_base(ffmpeg::Rational::new(1, MIX_RATE as i32));
     if global_header {

@@ -745,15 +745,23 @@ enum Attempt {
 }
 
 /// The ways to ask `encoder_name`, in order.
+///
+/// KG fork (2026-11-04, binding): the Google encoder is NEVER used, on
+/// any path. For H.264 on Android the order is pinned, component by
+/// component, so no generic ask can silently pick a Google component:
+/// Huawei's hardware encoder first, then Android's Codec2 component,
+/// and nothing after that - the export-level MPEG-4 fallback is the
+/// third and last step, not another MediaCodec component. A generic
+/// AsAsked/Plain ask is kept only for HEVC/AV1, which name no Google
+/// component and are not the Phase 1 export path.
 fn attempts(encoder_name: &str) -> &'static [Attempt] {
     use Attempt::*;
     match encoder_name {
-        // c2.android.* since Android 10; OMX.google.* before it.
+        // KG fork 2026-11-04: OMX.hisi first, c2 second, no Google ever.
+        // Do NOT re-add OMX.google.h264.encoder here, even as a fallback.
         "h264_mediacodec" => &[
-            AsAsked,
-            Plain,
+            Component("OMX.hisi.video.encoder.avc"),
             Component("c2.android.avc.encoder"),
-            Component("OMX.google.h264.encoder"),
         ],
         "hevc_mediacodec" => &[AsAsked, Plain, Component("c2.android.hevc.encoder")],
         "av1_mediacodec" => &[AsAsked, Plain, Component("c2.android.av1.encoder")],
@@ -764,8 +772,11 @@ fn attempts(encoder_name: &str) -> &'static [Attempt] {
 impl Attempt {
     /// Whether `encoder_name` asked this way encodes on the CPU: one of
     /// Android's own components, or an encoder that is software already.
+    /// Huawei's hisi component is hardware, not software: treating it as
+    /// software would make a software-only retry try the chip again.
     fn in_software(self, encoder_name: &str) -> bool {
         match self {
+            Attempt::Component("OMX.hisi.video.encoder.avc") => false,
             Attempt::Component(_) => true,
             Attempt::AsAsked | Attempt::Plain => !Family::of(encoder_name).hardware(),
         }
@@ -1584,6 +1595,14 @@ impl Encoder {
                             Attempt::Component(component) => Some(component),
                             _ => None,
                         };
+                        // KG fork (2026-11-04, Phase 1): one line the
+                        // export log can be read from - which encoder
+                        // was tried and which one actually opened, so a
+                        // shared log answers "which encoder ran" without
+                        // guessing from the file size.
+                        log::info!(
+                            "export encoder: {name} component={component:?} hardware={hardware} (Phase 1 order: hisi, c2, then MPEG-4; no Google encoder)"
+                        );
                         opened = Some((name, codec, encoder, pixel_format, hardware, component));
                         break 'encoders;
                     }
@@ -1597,6 +1616,21 @@ impl Encoder {
         let Some((encoder_name, codec, encoder, pixel_format, hardware, component)) = opened else {
             // Nothing was even tried when the CPU alone was asked for and
             // every linked encoder is hardware.
+            // KG fork (2026-11-04): when no MediaCodec component opens,
+            // say so in words the export-level MPEG-4 fallback recognises,
+            // so an open failure falls back instead of ending the export
+            // outright (the old generic failure did not trigger it).
+            if options.codec == VideoCodec::H264 {
+                let detail = match failure {
+                    Some(error) => format!("mediacodec encoder open failed: {error}"),
+                    None => "mediacodec encoder open failed: no MediaCodec component opened".to_owned(),
+                };
+                return Err(Error::Ffi {
+                    operation: "open encoder",
+                    path: path.to_path_buf(),
+                    detail,
+                });
+            }
             return Err(failure.unwrap_or_else(|| Error::Missing {
                 what: "software encoder",
                 name: options.codec.label().to_owned(),
@@ -2458,18 +2492,16 @@ mod tests {
 
     /// Each kind of encoder is handed the pictures it reads, and ten bits
     /// only where it takes them.
-    /// A phone's encoder that will not open as asked is asked plainly,
-    /// then Android's own software one is asked by name; every other
-    /// encoder is asked once, as before (#491).
+    /// KG fork (2026-11-04): H.264 on a phone is asked component by
+    /// component - Huawei's hardware encoder first, then Codec2 - and
+    /// never the Google encoder, on any path.
     #[test]
     fn a_phone_encoder_is_asked_again_before_the_export_fails() {
         assert_eq!(
             attempts("h264_mediacodec"),
             [
-                Attempt::AsAsked,
-                Attempt::Plain,
+                Attempt::Component("OMX.hisi.video.encoder.avc"),
                 Attempt::Component("c2.android.avc.encoder"),
-                Attempt::Component("OMX.google.h264.encoder"),
             ]
         );
         assert_eq!(attempts("hevc_mediacodec")[1], Attempt::Plain);
@@ -2483,6 +2515,8 @@ mod tests {
     /// An export going again on the CPU after a phone's chip stopped part
     /// way through asks Android's own software components only, never the
     /// chip again; on a desktop, the software encoders only (#491).
+    /// KG fork (2026-11-04): the Google encoder is gone, so the
+    /// software-only list for H.264 is Codec2 alone.
     #[test]
     fn a_stalled_chip_is_passed_over_for_the_cpu() {
         let cpu = EncodeOptions {
@@ -2495,10 +2529,7 @@ mod tests {
         };
         assert_eq!(
             asked("h264_mediacodec", &cpu),
-            [
-                Attempt::Component("c2.android.avc.encoder"),
-                Attempt::Component("OMX.google.h264.encoder"),
-            ]
+            [Attempt::Component("c2.android.avc.encoder"),]
         );
         assert_eq!(
             asked("hevc_mediacodec", &cpu),

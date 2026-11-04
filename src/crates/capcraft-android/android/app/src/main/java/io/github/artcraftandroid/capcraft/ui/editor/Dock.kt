@@ -265,6 +265,8 @@ private fun rootTools(vm: EditorViewModel): List<Tool> = listOfNotNull(
         vm.dock = vm.dock + DockLevel.Group("captions")
         vm.panel = Panel.Captions
     },
+    // Phase 1: project templates, template files and backup live here.
+    Tool("templates", "Templates", LucideIcons.LayoutTemplate) { vm.panel = Panel.Templates },
     // both open their sheet over a group of the two, as the reference does
     Tool("filters", "Filters", LucideIcons.Blend) {
         vm.dock = vm.dock + DockLevel.Group("filters")

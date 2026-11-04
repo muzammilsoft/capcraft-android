@@ -119,6 +119,7 @@ fun PanelHost(vm: EditorViewModel) {
                 Panel.CustomCutout -> CustomCutoutPanel(vm)
                 Panel.ShapeStyle -> ShapeStylePanel(vm)
                 Panel.CaptionTemplates -> CaptionTemplatesPanel(vm)
+                Panel.Templates -> TemplatesPanel(vm)
                 Panel.Collage -> CollagePanel(vm)
                 Panel.Relight -> RelightPanel(vm)
                 Panel.Sounds -> SoundsPage(vm)

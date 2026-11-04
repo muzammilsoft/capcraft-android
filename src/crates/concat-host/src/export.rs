@@ -38,6 +38,9 @@ pub struct ExportSpec {
     pub rate_mode: concat_media::RateMode,
     /// Target bitrate in kbps, used when `rate_mode` is CBR.
     pub bitrate_kbps: u32,
+    /// Target audio bitrate in kbps for the mixed track, Phase 1
+    /// presets: 96 or 128. Zero keeps the mixer's existing default.
+    pub audio_kbps: u32,
     /// The levels the file is written in and tagged with. Video range,
     /// 16-235, unless the sheet's Advanced section says full.
     /// https://github.com/jub0t/Concat/issues/103
@@ -79,6 +82,7 @@ pub fn request(session: &Session, spec: &ExportSpec, titles: Vec<ExportClip>) ->
         ten_bit: spec.ten_bit,
         rate_mode: spec.rate_mode,
         bitrate_kbps: spec.bitrate_kbps,
+        audio_kbps: spec.audio_kbps,
         color_range: spec.color_range,
         color_space: session.video().color_space,
         hdr: spec.hdr,
