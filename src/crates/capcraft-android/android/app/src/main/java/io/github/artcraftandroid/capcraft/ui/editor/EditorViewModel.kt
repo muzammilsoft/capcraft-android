@@ -85,6 +85,8 @@ sealed interface Panel {
     data object Retouch : Panel
     data object CustomCutout : Panel
     data object ShapeStyle : Panel
+    /** Phase 2: a vector shape's points, corners and stretch. */
+    data object VectorShape : Panel
     data object CaptionTemplates : Panel
     /** Phase 1: project templates, backup and template files. */
     data object Templates : Panel
@@ -92,6 +94,8 @@ sealed interface Panel {
     data object Relight : Panel
     data object Lyrics : Panel
     data object Graphs : Panel
+    /** Phase 2: the multi-point motion graph for one property. */
+    data object MotionGraph : Panel
     data object Layer : Panel
     /** What an effect on the timeline treats: the main track alone, or every picture. */
     data object EffectObject : Panel
@@ -432,6 +436,21 @@ class EditorViewModel(app: Application, val path: String) : AndroidViewModel(app
         val s = session ?: return
         val style = org.json.JSONObject().put("kind", kind).put("size", 0.25).put("fill", "#ffffff")
         if (kind == "line" || kind == "arrow") style.put("fill", "").put("stroke", "#ffffff").put("strokeWidth", 0.01)
+        edit(select = { it.createdId.ifEmpty { null } }) { addShape(playhead, 3_000_000, style.toString(), name) }
+    }
+
+    /**
+     * Phase 2: a vector shape - a polygon whose points are editable, not
+     * a fixed figure. Points are fractions of the shape's size, centred
+     * (-0.5 is the left/top edge, 0.5 the right/bottom).
+     */
+    fun addVectorShape(points: List<Pair<Double, Double>>, name: String) {
+        val s = session ?: return
+        val style = org.json.JSONObject().put("kind", "vector").put("size", 0.25).put("fill", "#ffffff")
+            .put("cornerRadius", 0.0)
+            .put("points", org.json.JSONArray().apply {
+                points.forEach { (x, y) -> put(org.json.JSONArray().apply { put(x); put(y) }) }
+            })
         edit(select = { it.createdId.ifEmpty { null } }) { addShape(playhead, 3_000_000, style.toString(), name) }
     }
 

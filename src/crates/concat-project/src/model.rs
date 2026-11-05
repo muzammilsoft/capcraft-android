@@ -1407,6 +1407,10 @@ pub enum ShapeKind {
     Hexagon,
     /// A square stood on its corner, taller than wide.
     Diamond,
+    /// A custom vector polygon: the points in [`ShapeStyle::points`],
+    /// drawn in order and closed. Phase 2: the shape KG asked for -
+    /// editable geometry, not a fixed figure.
+    Vector,
 }
 
 impl ShapeKind {
@@ -1424,6 +1428,7 @@ impl ShapeKind {
             ShapeKind::Heart => "heart",
             ShapeKind::Hexagon => "hexagon",
             ShapeKind::Diamond => "diamond",
+            ShapeKind::Vector => "vector",
         }
     }
 
@@ -1441,6 +1446,7 @@ impl ShapeKind {
             ShapeKind::Heart,
             ShapeKind::Hexagon,
             ShapeKind::Diamond,
+            ShapeKind::Vector,
         ]
         .into_iter()
         .find(|kind| kind.id() == id)
@@ -1468,6 +1474,16 @@ pub struct ShapeStyle {
     /// The outline's thickness as a fraction of frame height; zero for a
     /// figure with no outline. A line's and an arrow's own thickness.
     pub stroke_width: f64,
+    /// Phase 2, vector shapes only: the polygon's points, in order, as
+    /// fractions of `size` centred on the shape (-0.5 is the left/top
+    /// edge, 0.5 the right/bottom). Empty for every fixed figure.
+    /// Points are editable in the UI: add, drag, delete.
+    #[serde(default)]
+    pub points: Vec<[f64; 2]>,
+    /// Phase 2, vector shapes only: how round the polygon's corners are,
+    /// as a fraction of `size`, 0 for sharp corners up to 0.5.
+    #[serde(default)]
+    pub corner_radius: f64,
 }
 
 impl ShapeStyle {
@@ -1487,6 +1503,17 @@ impl ShapeStyle {
         let base = ShapeStyle::default();
         self.size = finite(self.size, base.size).clamp(0.01, 2.0);
         self.stroke_width = finite(self.stroke_width, base.stroke_width).clamp(0.0, 0.5);
+        self.corner_radius = finite(self.corner_radius, 0.0).clamp(0.0, 0.5);
+        self.points = self
+            .points
+            .into_iter()
+            .map(|[x, y]| {
+                [
+                    finite(x, 0.0).clamp(-1.0, 1.0),
+                    finite(y, 0.0).clamp(-1.0, 1.0),
+                ]
+            })
+            .collect();
         self
     }
 }
@@ -1504,6 +1531,8 @@ impl Default for ShapeStyle {
             // is a visible rule and not zero; a filled figure ignores it
             // until it is given an outline colour.
             stroke_width: 0.012,
+            points: Vec::new(),
+            corner_radius: 0.0,
         }
     }
 }

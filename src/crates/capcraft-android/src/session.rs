@@ -1305,9 +1305,12 @@ impl MobileSession {
                     let Some(((bw, bh), (ox, oy))) = titles.get(&clip.id) else {
                         continue;
                     };
+                    // Phase 2: the frame follows a shape's stretch, as
+                    // the still itself does, so a rectangle pulled wide
+                    // is framed wide in the preview too.
                     (
-                        f64::from(*bw) * scale,
-                        f64::from(*bh) * scale,
+                        f64::from(*bw) * scale * clip.stretch_x,
+                        f64::from(*bh) * scale * clip.stretch_y,
                         (f64::from(*ox) * scale, f64::from(*oy) * scale),
                     )
                 }

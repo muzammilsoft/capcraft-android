@@ -75,12 +75,15 @@ private class Badge(val text: String, val plate: Int, val ink: Int, val shape: B
  * engine's own (a shape clip, by the name the engine keeps, whose fill and outline Style changes);
  * [words] are what search finds it by, the first of them a figure's name.
  */
-private class Sticker(val words: String, val emoji: String? = null, val shape: Shape? = null, val figure: String? = null, val badge: Badge? = null) {
+private class Sticker(val words: String, val emoji: String? = null, val shape: Shape? = null, val figure: String? = null, val badge: Badge? = null, val vector: List<Pair<Double, Double>>? = null) {
     val key: String = emoji?.codePoints()?.toArray()?.joinToString("-") { Integer.toHexString(it) }
         ?: figure?.let { "figure-$it" }
+        ?: vector?.let { "vector-" + words.substringBefore(' ') }
         ?: badge?.let { "label-" + it.text.lowercase().replace(Regex("[^a-z0-9]+"), "-") }
         ?: "shape-" + shape!!.name.lowercase()
 }
+
+private fun vectorShape(words: String, vararg points: Pair<Double, Double>) = Sticker(words, vector = points.toList())
 
 private fun badge(text: String, plate: Long, ink: Long, shape: BadgeShape, words: String = "") =
     Sticker((text.lowercase() + " label badge " + words).trim(), badge = Badge(text, plate.toInt(), ink.toInt(), shape))
@@ -103,6 +106,13 @@ private val SHELVES = listOf(
         Sticker("heart love", figure = "heart"),
         Sticker("hexagon", figure = "hexagon"),
         Sticker("diamond rhombus", figure = "diamond"),
+        // Phase 2 vector shapes: polygons whose points are editable
+        // in the Vector panel, not fixed figures.
+        vectorShape("pentagon vector shape", -0.5 to 0.15, -0.15 to -0.5, 0.3 to -0.4, 0.5 to 0.1, 0.15 to 0.5, -0.3 to 0.5),
+        vectorShape("chevron arrow vector shape", -0.5 to -0.5, 0.1 to -0.5, 0.5 to 0.0, 0.1 to 0.5, -0.5 to 0.5, -0.1 to 0.0),
+        vectorShape("speech bubble vector shape", -0.5 to -0.5, 0.5 to -0.5, 0.5 to 0.2, 0.1 to 0.2, -0.1 to 0.5, -0.1 to 0.2, -0.5 to 0.2),
+        vectorShape("right triangle vector shape", -0.5 to -0.5, 0.5 to -0.5, 0.5 to 0.5),
+        vectorShape("house vector shape", -0.5 to 0.0, 0.0 to -0.5, 0.5 to 0.0, 0.5 to 0.5, -0.5 to 0.5),
         Sticker("ring circle mark", shape = Shape.Ring),
         Sticker("arrow right point", shape = Shape.ArrowRight),
         Sticker("arrow down point", shape = Shape.ArrowDown),
@@ -228,6 +238,10 @@ fun StickersPanel(vm: EditorViewModel) {
         if (uri != null) vm.addStickerFrom(uri)
     }
     fun add(s: Sticker) {
+        s.vector?.let { points ->
+            vm.addVectorShape(points, s.words.substringBefore(' ').replaceFirstChar { it.uppercase() })
+            return
+        }
         s.figure?.let { figure ->
             vm.addShape(figure, s.words.substringBefore(' ').replaceFirstChar { it.uppercase() })
             return
@@ -293,7 +307,8 @@ fun StickersPanel(vm: EditorViewModel) {
                     val picture by produceState<Bitmap?>(ShapeTiles.get(s.key), s.key) {
                         // a reused tile may still hold another shape's picture: always this one's
                         value = ShapeTiles.get(s.key) ?: withContext(Threads.thumbnails) {
-                            s.badge?.let { drawBadge(it, 160) } ?: drawShape(s.shape!!, 160)
+                            s.vector?.let { drawVector(it, 160) }
+                                ?: s.badge?.let { drawBadge(it, 160) } ?: drawShape(s.shape!!, 160)
                         }.also { ShapeTiles.put(s.key, it) }
                     }
                     picture?.let { Image(it.asImageBitmap(), contentDescription = s.words, modifier = Modifier.fillMaxSize().padding(10.dp)) }
@@ -464,6 +479,21 @@ private fun drawBadge(badge: Badge, size: Int): Bitmap {
 }
 
 /** One of our shapes on a transparent square [size] pixels across. */
+/** Phase 2: a vector polygon's shelf tile - its own points, filled white. */
+private fun drawVector(points: List<Pair<Double, Double>>, size: Int): Bitmap {
+    val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val c = AndroidCanvas(b)
+    val path = AndroidPath()
+    points.forEachIndexed { i, (x, y) ->
+        val px = ((x + 0.5) * size).toFloat()
+        val py = ((y + 0.5) * size).toFloat()
+        if (i == 0) path.moveTo(px, py) else path.lineTo(px, py)
+    }
+    path.close()
+    c.drawPath(path, Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = AndroidColor.WHITE })
+    return b
+}
+
 private fun drawShape(shape: Shape, size: Int): Bitmap {
     val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
     val c = AndroidCanvas(b)

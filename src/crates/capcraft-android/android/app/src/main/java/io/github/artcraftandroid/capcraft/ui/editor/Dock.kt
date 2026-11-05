@@ -493,6 +493,8 @@ private fun clipTools(vm: EditorViewModel, clip: ClipView, row: RowKind, pickers
             }
             if (video) add(Tool("transcript", "Transcript", LucideIcons.FileText) { vm.panel = Panel.Transcript })
             add(graphs)
+            // Phase 2: the multi-point graph for one property's keys
+            add(Tool("motiongraph", "Motion graph", LucideIcons.ChartSpline) { vm.panel = Panel.MotionGraph })
         }
         // in the reference's order: a new recording set apart, the clip's edits, then its sound
         "audio" -> listOf(
@@ -529,6 +531,9 @@ private fun clipTools(vm: EditorViewModel, clip: ClipView, row: RowKind, pickers
             divider("d-addtext"),
             split,
             Tool("style", "Style", LucideIcons.ALargeSmall) { vm.panel = if (clip.kind == "shape") Panel.ShapeStyle else Panel.Text(clip.id) },
+            // Phase 2: vector shapes get their point editor; a fixed
+            // figure shows it too, and it explains how to add a vector.
+            Tool("vector", "Vector", LucideIcons.Shapes, enabled = clip.kind == "shape") { vm.panel = Panel.VectorShape },
             Tool("animation", "Animations", LucideIcons.SquarePlay) { vm.panel = Panel.Animation },
             delete,
             duplicate,
@@ -547,6 +552,8 @@ private fun clipTools(vm: EditorViewModel, clip: ClipView, row: RowKind, pickers
             },
             layer,
             Tool("basic", "Basic", LucideIcons.SlidersHorizontal) { vm.panel = Panel.Basic },
+            // Phase 2: the multi-point graph for one property's keys
+            Tool("motiongraph", "Motion graph", LucideIcons.ChartSpline) { vm.panel = Panel.MotionGraph },
             // several titles and stickers at once, starting with this one
             Tool("multiselect", "Multi-select", LucideIcons.SquareCheckBig) {
                 vm.select(null)

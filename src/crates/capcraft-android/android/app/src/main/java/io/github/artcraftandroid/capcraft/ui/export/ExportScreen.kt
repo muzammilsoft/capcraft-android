@@ -183,15 +183,18 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                 if (gif) {
                     startGifExport(s, GifSettings(out, vm.gifSize.toUInt(), vm.gifFps.toUInt()), listener)
                 } else {
-                    // Phase 1: write the native encoder list before the
-                    // export starts, so the log view can show it even
-                    // when the export itself never reaches the engine.
-                    writeNativeEncoderList(appContext)
+                    // Phase 2: the native encoder list is written AFTER
+                    // the export starts, not before it, so its cost is
+                    // never part of the export's startup delay. The log
+                    // view reads the newest file whenever it is opened,
+                    // and a failure takes seconds to surface, so the list
+                    // is there by the time anyone looks for it.
                     startExport(
                         s,
                         ExportSettings(res.toUInt(), vm.exportFps.toUInt(), kbps.toUInt(), exportAudioKbps(vm).toUInt(), false, out),
                         listener,
                     )
+                    runCatching { writeNativeEncoderList(appContext) }
                 }
             }
         }
@@ -300,6 +303,17 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                         ShareTarget(LucideIcons.Share2, "Share") { st.uri?.let { share(context, it) } }
                         ShareTarget(LucideIcons.ExternalLink, "Open") { st.uri?.let { open(context, it, vm.exportGif, vm.exportPhoto) } }
                     }
+                    // Phase 2: the export log is also reachable after a
+                    // slow-but-successful export, not only after a
+                    // failure - that is exactly when the startup-delay
+                    // timings in it are needed.
+                    Spacer(Modifier.height(20.dp))
+                    Box(
+                        Modifier.clip(RoundedCornerShape(8.dp)).background(Color(0x22FFFFFF)).clickable {
+                            logText = loadExportLog(context)
+                            showLog = true
+                        }.padding(horizontal = 24.dp, vertical = 10.dp),
+                    ) { Text("View export log", style = Type.BodyStrong) }
                 }
                 is Stage.Failed -> {
                     Text("Export failed", style = Type.Title)

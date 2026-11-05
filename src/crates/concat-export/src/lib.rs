@@ -1155,6 +1155,11 @@ pub fn render_on(
     compositor: Option<WgpuCompositor>,
     mut reporter: Reporter<'_>,
 ) -> Result<String, String> {
+    // Phase 2 export-delay diagnosis: log-only stage timing, so a
+    // slow export start can be blamed on the stage that actually took
+    // the time instead of guessed at. The `export:` prefix is what
+    // keeps these lines in the export-log view on the phone.
+    let render_started = std::time::Instant::now();
     // A clear canvas bound for a format that keeps no alpha is laid over
     // black first, as the frame is drawn, rather than having its alpha
     // dropped by the encoder after: dropped, a soft edge or a glow keeps
@@ -1262,6 +1267,10 @@ pub fn render_on(
     if total_frames <= 0 {
         return Err("the timeline is empty".to_owned());
     }
+    log::info!(
+        "export: timing validate-probe {}ms",
+        render_started.elapsed().as_millis()
+    );
 
     // Render into siblings of the output so the move at the end stays on one
     // filesystem, then clean up whatever we made.
@@ -1293,6 +1302,10 @@ pub fn render_on(
     // way the file was made. The mux used to write it directly, and a mux
     // that failed - the disk full, a read error - left a truncated file
     // where the previous export had been (audit 2026-10-09, finding 4).
+    log::info!(
+        "export: timing before-picture {}ms",
+        render_started.elapsed().as_millis()
+    );
     let result = (|| -> Result<(), String> {
         // KG fork (2026-11-01), Android only: every MediaCodec encoder
         // on the Y8p stalls after 4-5 frames, at 720p and at 480p, on a
@@ -1368,6 +1381,10 @@ pub fn render_on(
     let _ = std::fs::remove_file(&mixed);
     let _ = std::fs::remove_file(&muxed);
 
+    log::info!(
+        "export: timing render-on total {}ms",
+        render_started.elapsed().as_millis()
+    );
     result.map(|()| output.to_string_lossy().into_owned())
 }
 
@@ -1789,11 +1806,18 @@ fn render_picture(
     destination: &Path,
     reporter: &mut Reporter<'_>,
 ) -> Result<(), String> {
+    // Phase 2: GPU-device creation and timeline building are the two
+    // suspects inside the picture pass; time them separately.
+    let picture_started = std::time::Instant::now();
     let effect_offset = quantise(request.effect_time_offset, rate);
     let mut compositor = match compositor {
         Some(lent) => lent,
         None => best_compositor()?,
     };
+    log::info!(
+        "export: timing compositor {}ms",
+        picture_started.elapsed().as_millis()
+    );
     // Which chip and API the file is drawn on: the first thing a report of
     // an export gone wrong needs to say, and until now could not (#202).
     let adapter = compositor.adapter_info();
@@ -1848,6 +1872,10 @@ fn render_picture(
         highlight: _,
         backdrops,
     } = build_timeline(request, rate, visible, transitions);
+    log::info!(
+        "export: timing build-timeline {}ms",
+        picture_started.elapsed().as_millis()
+    );
 
     let mut options = EncodeOptions {
         crf: request.crf,

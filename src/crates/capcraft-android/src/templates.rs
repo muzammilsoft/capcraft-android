@@ -7,7 +7,7 @@
 //! slots: placeholder media in the bin, bundled design files beside it.
 //! The UI exposes only what Phase 1 promises: list, save the current
 //! project as a template, apply a template with slot fills, and the one
-//! built-in template, "KG Bilibili split". The full template editor -
+//! built-in template, "Split screen". The full template editor -
 //! designing a new template layout from scratch in the UI - is Phase 3,
 //! not this build.
 
@@ -189,7 +189,13 @@ pub fn delete_template(template_path: String) -> Result<(), MobileError> {
     Ok(())
 }
 
-const KG_TEMPLATE_NAME: &str = "KG Bilibili split";
+/// Phase 2: the built-in template is named neutrally, "Split screen" -
+/// no app or platform name in it. Devices that already have it under its
+/// Phase 1 name, "KG Bilibili split", get the old bundle renamed in place
+/// (folder and the name inside template.json), so the library never holds
+/// both names at once.
+const KG_TEMPLATE_NAME: &str = "Split screen";
+const OLD_KG_TEMPLATE_NAME: &str = "KG Bilibili split";
 
 /// Creates the one built-in Phase 1 template, if it is not already in
 /// the library, and returns it. Landscape 16:9, 30 fps: the main video
@@ -209,6 +215,40 @@ pub fn ensure_kg_bilibili_template() -> Result<TemplateInfoView, MobileError> {
         .find(|info| info.name == KG_TEMPLATE_NAME)
     {
         return Ok(view_of(existing));
+    }
+    // Phase 2 rename: an old "KG Bilibili split" bundle becomes "Split
+    // screen" in place, folder and manifest name together, so it is found
+    // by the check above on the next call instead of being rebuilt.
+    if templates::list(&context.dirs.config)
+        .into_iter()
+        .any(|info| info.name == OLD_KG_TEMPLATE_NAME)
+    {
+        let dir = templates::templates_dir(&context.dirs.config);
+        let old_root = dir.join(concat_host::projects::folder_name(OLD_KG_TEMPLATE_NAME));
+        let new_root = dir.join(concat_host::projects::folder_name(KG_TEMPLATE_NAME));
+        if old_root != new_root
+            && old_root.join("template.json").exists()
+            && !new_root.exists()
+        {
+            if let Ok(bytes) = std::fs::read(old_root.join("template.json")) {
+                if let Ok(mut document) =
+                    serde_json::from_slice::<serde_json::Value>(&bytes)
+                {
+                    document["name"] =
+                        serde_json::Value::String(KG_TEMPLATE_NAME.to_owned());
+                    if let Ok(encoded) = serde_json::to_vec_pretty(&document) {
+                        let _ = std::fs::write(old_root.join("template.json"), encoded);
+                    }
+                }
+            }
+            let _ = std::fs::rename(&old_root, &new_root);
+        }
+        if let Some(migrated) = templates::list(&context.dirs.config)
+            .into_iter()
+            .find(|info| info.name == KG_TEMPLATE_NAME)
+        {
+            return Ok(view_of(migrated));
+        }
     }
     let source: PathBuf = context.cache.join("kg-template-source");
     let _ = std::fs::create_dir_all(&source);

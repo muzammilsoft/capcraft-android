@@ -1,8 +1,11 @@
 package io.github.artcraftandroid.capcraft.ui.editor.panels
 
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -10,6 +13,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -21,12 +25,16 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -44,12 +52,11 @@ import io.github.artcraftandroid.capcraft.ui.Palette
 import io.github.artcraftandroid.capcraft.ui.Type
 import io.github.artcraftandroid.capcraft.ui.common.MediaKinds
 import io.github.artcraftandroid.capcraft.ui.common.MediaPick
-import io.github.artcraftandroid.capcraft.ui.common.exportBackup
 import io.github.artcraftandroid.capcraft.ui.common.exportTemplateFile
 import io.github.artcraftandroid.capcraft.ui.common.importTemplateFile
-import io.github.artcraftandroid.capcraft.ui.common.restoreBackup
 import io.github.artcraftandroid.capcraft.ui.editor.EditorViewModel
 import io.github.artcraftandroid.capcraft.ui.editor.Panel
+import java.io.File
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -70,9 +77,11 @@ import org.json.JSONObject
  * the new one is exported; Phase 3 will copy fills into the new
  * project itself.
  *
- * Backup is here too, because it is what makes a reinstall safe:
- * export before you uninstall, restore after you reinstall, and check
- * the result in the message before you delete anything.
+ * Phase 2: every template shows a preview of its layout (its poster
+ * picture when the bundle has one, a drawn schematic of its slots
+ * otherwise), the built-in template is named neutrally ("Split
+ * screen"), and the list itself is hidden when there are no templates
+ * at all. Backup lives in Settings only now, not here.
  */
 @Composable
 fun TemplatesPanel(vm: EditorViewModel) {
@@ -100,13 +109,6 @@ fun TemplatesPanel(vm: EditorViewModel) {
             withContext(kotlinx.coroutines.Dispatchers.Main) { vm.message = result; refresh() }
         }
     }
-    val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        scope.launch(Threads.commands) {
-            val result = runCatching { restoreBackup(context, uri) }.getOrElse { it.userMessage }
-            withContext(kotlinx.coroutines.Dispatchers.Main) { vm.message = result }
-        }
-    }
 
     PanelFrame("Templates", vm, tall = true) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
@@ -115,12 +117,12 @@ fun TemplatesPanel(vm: EditorViewModel) {
                 style = Type.Small.copy(fontSize = 13.sp),
             )
             Spacer(Modifier.height(12.dp))
-            ActionRow("Create the KG Bilibili split template") {
+            ActionRow("Create the split screen template") {
                 if (busy) return@ActionRow
                 busy = true
                 scope.launch(Threads.commands) {
                     val result = runCatching { ensureKgBilibiliTemplate() }.fold(
-                        onSuccess = { "KG Bilibili split is ready: ${it.width}x${it.height}, ${it.slots.size} video slot(s). Apply it below." },
+                        onSuccess = { "Split screen is ready: ${it.width}x${it.height}, ${it.slots.size} video slot(s). Apply it below." },
                         onFailure = { it.userMessage },
                     )
                     withContext(kotlinx.coroutines.Dispatchers.Main) { vm.message = result; busy = false; refresh() }
@@ -159,36 +161,40 @@ fun TemplatesPanel(vm: EditorViewModel) {
                 }
             }
             Spacer(Modifier.height(12.dp))
-            Text("Templates", style = Type.BodyStrong.copy(fontSize = 15.sp, fontWeight = FontWeight.SemiBold))
-            if (templates.isEmpty()) {
-                Text("No templates yet. Create the KG Bilibili split above, or save this project as one.", style = Type.Small.copy(fontSize = 13.sp))
-            }
-            for (template in templates) {
-                Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(template.name, style = Type.BodyStrong.copy(fontSize = 14.sp), modifier = Modifier.weight(1f))
-                        Text("${template.width}x${template.height}", style = Type.Small.copy(fontSize = 12.sp))
-                    }
-                    Text(
-                        if (template.slots.isEmpty()) "No video slots (text and layout only)" else "Slots: ${template.slots.joinToString { it.name }}",
-                        style = Type.Small.copy(fontSize = 12.sp),
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ActionButton(if (selected?.path == template.path) "Selected" else "Apply") {
-                            selected = template
-                            fills = emptyMap()
-                            newProjectName = template.name + " copy"
+            // Phase 2: no templates, no list at all - not even the header
+            // or an empty-state line. The create and save rows above are
+            // how the first template comes to exist.
+            if (templates.isNotEmpty()) {
+                Text("Templates", style = Type.BodyStrong.copy(fontSize = 15.sp, fontWeight = FontWeight.SemiBold))
+                for (template in templates) {
+                    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                        TemplatePreview(template)
+                        Spacer(Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(template.name, style = Type.BodyStrong.copy(fontSize = 14.sp), modifier = Modifier.weight(1f))
+                            Text("${template.width}x${template.height}", style = Type.Small.copy(fontSize = 12.sp))
                         }
-                        ActionButton("Export file") {
-                            scope.launch(Threads.commands) {
-                                val result = runCatching { exportTemplateFile(context, template.path) }.getOrElse { it.userMessage }
-                                withContext(kotlinx.coroutines.Dispatchers.Main) { vm.message = result }
+                        Text(
+                            if (template.slots.isEmpty()) "No video slots (text and layout only)" else "Slots: ${template.slots.joinToString { it.name }}",
+                            style = Type.Small.copy(fontSize = 12.sp),
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ActionButton(if (selected?.path == template.path) "Selected" else "Apply") {
+                                selected = template
+                                fills = emptyMap()
+                                newProjectName = template.name + " copy"
                             }
-                        }
-                        ActionButton("Delete") {
-                            scope.launch(Threads.commands) {
-                                runCatching { deleteTemplate(template.path) }
-                                withContext(kotlinx.coroutines.Dispatchers.Main) { refresh() }
+                            ActionButton("Export file") {
+                                scope.launch(Threads.commands) {
+                                    val result = runCatching { exportTemplateFile(context, template.path) }.getOrElse { it.userMessage }
+                                    withContext(kotlinx.coroutines.Dispatchers.Main) { vm.message = result }
+                                }
+                            }
+                            ActionButton("Delete") {
+                                scope.launch(Threads.commands) {
+                                    runCatching { deleteTemplate(template.path) }
+                                    withContext(kotlinx.coroutines.Dispatchers.Main) { refresh() }
+                                }
                             }
                         }
                     }
@@ -248,21 +254,65 @@ fun TemplatesPanel(vm: EditorViewModel) {
             Text("Template files", style = Type.BodyStrong.copy(fontSize = 15.sp, fontWeight = FontWeight.SemiBold))
             ActionRow("Import template file (zip)") { importTemplate.launch(arrayOf("application/zip", "application/octet-stream")) }
             Spacer(Modifier.height(16.dp))
-            Text("Backup before reinstall", style = Type.BodyStrong.copy(fontSize = 15.sp, fontWeight = FontWeight.SemiBold))
-            Text(
-                "Export first, uninstall second, restore after reinstall. Backup holds projects (without cache), templates and looks; downloaded models are not included and must be re-downloaded.",
-                style = Type.Small.copy(fontSize = 13.sp),
-            )
-            Spacer(Modifier.height(8.dp))
-            ActionRow("Export backup to Downloads/CapCraftBackup") {
-                scope.launch(Threads.commands) {
-                    val result = runCatching { exportBackup(context) }.getOrElse { it.userMessage }
-                    withContext(kotlinx.coroutines.Dispatchers.Main) { vm.message = result }
+        }
+    }
+}
+
+/**
+ * Phase 2: a template's layout at a glance. The bundle's poster
+ * picture when it has one (decoded off the main thread, like a
+ * project's cover on Home); otherwise a drawn schematic in the
+ * template's own aspect ratio - the video slot on the left and the
+ * text slots on the right for the built-in split screen, one bar per
+ * slot for any other template. A schematic is a layout preview, not a
+ * frame: it never pretends to show footage that is not there.
+ */
+@Composable
+private fun TemplatePreview(template: TemplateInfoView) {
+    val poster by produceState<android.graphics.Bitmap?>(null, template.path, template.hasPoster) {
+        value = if (!template.hasPoster) null else withContext(Threads.thumbnails) {
+            runCatching {
+                val file = File(template.path, "poster.jpg")
+                if (file.isFile) BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inSampleSize = 2 }) else null
+            }.getOrNull()
+        }
+    }
+    val aspect = (template.width.toFloat() / template.height.coerceAtLeast(1).toFloat()).coerceIn(0.5f, 3f)
+    Box(
+        Modifier.fillMaxWidth().aspectRatio(aspect).clip(RoundedCornerShape(8.dp)).background(Color(0xFF2A2A2A)),
+        contentAlignment = Alignment.Center,
+    ) {
+        val bitmap = poster
+        if (bitmap != null) {
+            Image(bitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        } else if (template.name == "Split screen") {
+            // the built-in layout: video left, three text blocks right
+            Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(0.55f).aspectRatio(16f / 9f).clip(RoundedCornerShape(4.dp)).background(Color(0xFF5A7DFF)))
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(0.45f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.85f)))
+                    Box(Modifier.fillMaxWidth(0.8f).height(8.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.55f)))
+                    Box(Modifier.fillMaxWidth(0.9f).height(8.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.55f)))
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            ActionRow("Restore backup (zip)") { restore.launch(arrayOf("application/zip", "application/octet-stream")) }
-            Spacer(Modifier.height(16.dp))
+        } else {
+            // any other template: one bar per slot, over a frame outline
+            Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                val slots = template.slots.ifEmpty { null }
+                if (slots == null) {
+                    Canvas(Modifier.fillMaxWidth().height(24.dp)) { drawRect(Color.White.copy(alpha = 0.4f)) }
+                    Text("Layout only", style = Type.Small.copy(color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp))
+                } else {
+                    for (slot in slots) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.weight(1f).height(14.dp).clip(RoundedCornerShape(2.dp)).background(Color(0xFF5A7DFF).copy(alpha = 0.8f)))
+                            Spacer(Modifier.width(6.dp))
+                            Text(slot.name, style = Type.Small.copy(color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp))
+                        }
+                    }
+                }
+            }
         }
     }
 }

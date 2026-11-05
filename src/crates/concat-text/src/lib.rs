@@ -2426,6 +2426,8 @@ pub enum Figure {
     Hexagon,
     /// A square stood on its corner, taller than wide.
     Diamond,
+    /// A custom vector polygon, from `ShapeStyle::points`.
+    Vector,
 }
 
 /// Everything about a shape's look, in the document's terms: sizes are
@@ -2443,6 +2445,10 @@ pub struct ShapeStyle {
     pub stroke: String,
     /// The outline's thickness, and a line's or an arrow's own.
     pub stroke_width: f64,
+    /// Vector polygons only: points as fractions of `size`, centred.
+    pub points: Vec<[f64; 2]>,
+    /// Vector polygons only: corner roundness, 0..=0.5 of `size`.
+    pub corner_radius: f64,
 }
 
 /// Paints `style` centred on a `width` × `height` transparent canvas and
@@ -2504,6 +2510,34 @@ fn straight_rgba(canvas: &Pixmap) -> Vec<u8> {
     rgba
 }
 
+/// A vector polygon's bounds, as fractions of its size: (min x, max x,
+/// min y, max y). Fewer than one point is the centred unit square.
+fn vector_bounds(points: &[[f64; 2]]) -> (f32, f32, f32, f32) {
+    let mut bounds = match points.first() {
+        Some([x, y]) => (*x as f32, *x as f32, *y as f32, *y as f32),
+        None => (-0.5, 0.5, -0.5, 0.5),
+    };
+    for [x, y] in points {
+        let (x, y) = (*x as f32, *y as f32);
+        bounds.0 = bounds.0.min(x);
+        bounds.1 = bounds.1.max(x);
+        bounds.2 = bounds.2.min(y);
+        bounds.3 = bounds.3.max(y);
+    }
+    bounds
+}
+
+/// The unit vector from `from` to `to`, and the distance between them.
+fn unit_towards(from: (f32, f32), to: (f32, f32)) -> (f32, f32, f32) {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len > 0.0 {
+        (dx / len, dy / len, len)
+    } else {
+        (0.0, 0.0, 0.0)
+    }
+}
+
 /// The canvas with the figure on it, and the figure's box.
 fn paint_shape(style: &ShapeStyle, width: u32, height: u32) -> Result<(Pixmap, Block), Error> {
     let mut canvas = Pixmap::new(width, height).ok_or(Error::Canvas(width, height))?;
@@ -2530,8 +2564,30 @@ fn paint_shape(style: &ShapeStyle, width: u32, height: u32) -> Result<(Pixmap, B
         Figure::Heart => (size, size * 0.9),
         Figure::Hexagon => (size, size * 0.866),
         Figure::Diamond => (size * 0.75, size),
+        // Phase 2 vector polygon: the box of its points, or a square
+        // when it has too few points to be a shape at all.
+        Figure::Vector => {
+            if style.points.len() >= 3 {
+                let (min_x, max_x, min_y, max_y) = vector_bounds(&style.points);
+                ((max_x - min_x) * size, (max_y - min_y) * size)
+            } else {
+                (size, size)
+            }
+        }
     };
     let (left, top) = (cx - w / 2.0, cy - h / 2.0);
+    // A vector polygon's box is centred on its points' own centre, not
+    // on the frame's centre, so an off-centre polygon keeps its place.
+    let (left, top) = match style.figure {
+        Figure::Vector if style.points.len() >= 3 => {
+            let (min_x, max_x, min_y, max_y) = vector_bounds(&style.points);
+            (
+                left + (min_x + max_x) / 2.0 * size,
+                top + (min_y + max_y) / 2.0 * size,
+            )
+        }
+        _ => (left, top),
+    };
     let (right, bottom) = (left + w, top + h);
 
     let mut path = PathBuilder::new();
@@ -2662,6 +2718,43 @@ fn paint_shape(style: &ShapeStyle, width: u32, height: u32) -> Result<(Pixmap, B
             path.line_to(tip, cy);
             path.line_to(tip - arm, cy + arm);
             false
+        }
+        Figure::Vector => {
+            // Phase 2: the polygon's own points, in order, closed. Fewer
+            // than three points is not a shape: paint nothing.
+            let points: Vec<(f32, f32)> = style
+                .points
+                .iter()
+                .map(|[x, y]| (cx + *x as f32 * size, cy + *y as f32 * size))
+                .collect();
+            if points.len() < 3 {
+                return Ok((canvas, (0, 0, 0, 0)));
+            }
+            let radius = (style.corner_radius.clamp(0.0, 0.5) as f32) * size;
+            for (i, current) in points.iter().enumerate() {
+                let prev = points[(i + points.len() - 1) % points.len()];
+                let next = points[(i + 1) % points.len()];
+                let (dx_in, dy_in, len_in) = unit_towards(prev, *current);
+                let (dx_out, dy_out, len_out) = unit_towards(*current, next);
+                let trim = radius.min(len_in / 2.0).min(len_out / 2.0);
+                let start = (
+                    current.0 - dx_in * trim,
+                    current.1 - dy_in * trim,
+                );
+                let end = (current.0 + dx_out * trim, current.1 + dy_out * trim);
+                if i == 0 {
+                    path.move_to(start.0, start.1);
+                } else {
+                    path.line_to(start.0, start.1);
+                }
+                if trim > 0.0 {
+                    path.quad_to(current.0, current.1, end.0, end.1);
+                } else {
+                    path.line_to(end.0, end.1);
+                }
+            }
+            path.close();
+            true
         }
     };
     let Some(path) = path.finish() else {
@@ -3834,6 +3927,8 @@ mod tests {
                 fill: "#ffffff".to_owned(),
                 stroke: String::new(),
                 stroke_width: 0.0,
+                points: Vec::new(),
+                corner_radius: 0.0,
             };
             let frame = render_shape_frame(&style, 400, 200).expect("paints");
             let alpha = |x: u32, y: u32| frame.rgba[((y * 400 + x) * 4 + 3) as usize];
@@ -3873,6 +3968,8 @@ mod tests {
             fill: "#ff0000".to_owned(),
             stroke: String::new(),
             stroke_width: 0.0,
+            points: Vec::new(),
+            corner_radius: 0.0,
         };
         let frame = render_shape_frame(&square, 400, 200).expect("paints");
         assert_eq!((frame.block_width, frame.block_height), (100, 100));
@@ -3890,6 +3987,8 @@ mod tests {
             fill: "#00ff00".to_owned(),
             stroke: String::new(),
             stroke_width: 0.05,
+            points: Vec::new(),
+            corner_radius: 0.0,
         };
         let frame = render_shape_frame(&line, 400, 200).expect("paints");
         assert_eq!((frame.block_width, frame.block_height), (100, 10));
@@ -3904,6 +4003,38 @@ mod tests {
 
         let png = render_shape(&square, 64, 64).expect("encodes");
         assert!(png.png.starts_with(b"\x89PNG"));
+    }
+
+    /// Phase 2: a vector polygon paints its own points, solid in the
+    /// middle and clear outside them, and a rounded corner keeps the
+    /// shape while softening the vertex.
+    #[test]
+    fn a_vector_polygon_paints_its_points() {
+        let triangle = ShapeStyle {
+            figure: Figure::Vector,
+            size: 0.5,
+            fill: "#ff0000".to_owned(),
+            stroke: String::new(),
+            stroke_width: 0.0,
+            points: vec![[0.0, -0.5], [0.5, 0.5], [-0.5, 0.5]],
+            corner_radius: 0.0,
+        };
+        let frame = render_shape_frame(&triangle, 400, 200).expect("paints");
+        assert_eq!((frame.block_width, frame.block_height), (100, 100));
+        let alpha = |x: u32, y: u32| frame.rgba[((y * 400 + x) * 4 + 3) as usize];
+        assert_eq!(alpha(200, 100), 255, "the centre is solid");
+        assert_eq!(alpha(200, 10), 0, "above the apex is clear");
+        assert_eq!(alpha(120, 180), 0, "outside the base is clear");
+
+        let rounded = ShapeStyle {
+            corner_radius: 0.2,
+            ..triangle
+        };
+        let frame = render_shape_frame(&rounded, 400, 200).expect("paints");
+        // the apex itself is cut back by the rounding
+        let rounded_alpha = |x: u32, y: u32| frame.rgba[((y * 400 + x) * 4 + 3) as usize];
+        assert_eq!(rounded_alpha(200, 100), 255, "rounded keeps the centre solid");
+        assert_eq!(rounded_alpha(200, 50), 0, "the apex tip is rounded off");
     }
 
     // ── colour emoji: https://github.com/jub0t/Concat/issues/276 ──

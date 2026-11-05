@@ -668,11 +668,14 @@ fn shape_style(style: &ShapeStyle) -> concat_text::ShapeStyle {
             ShapeKind::Heart => Figure::Heart,
             ShapeKind::Hexagon => Figure::Hexagon,
             ShapeKind::Diamond => Figure::Diamond,
+            ShapeKind::Vector => Figure::Vector,
         },
         size: style.size,
         fill: style.fill.clone(),
         stroke: style.stroke.clone(),
         stroke_width: style.stroke_width,
+        points: style.points.clone(),
+        corner_radius: style.corner_radius,
     }
 }
 

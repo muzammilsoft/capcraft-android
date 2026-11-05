@@ -67,9 +67,15 @@ pub struct Progress {
 
 /// The session flattened into a request the engine can render.
 pub fn request(session: &Session, spec: &ExportSpec, titles: Vec<ExportClip>) -> ExportRequest {
+    // Phase 2 export-delay diagnosis: log-only timing.
+    let started = std::time::Instant::now();
     let settings = session.settings();
     let mut clips = session.flattened_clips();
     clips.extend(titles);
+    log::info!(
+        "export: timing host-flatten {}ms",
+        started.elapsed().as_millis()
+    );
     ExportRequest {
         output: spec.output.clone(),
         width: settings.width,
@@ -123,14 +129,20 @@ pub fn run_on(
             stage,
         });
     };
-    render_on(
+    let started = std::time::Instant::now();
+    let result = render_on(
         request,
         compositor,
         Reporter {
             progress: &mut report,
             cancel,
         },
-    )
+    );
+    log::info!(
+        "export: timing render-on {}ms",
+        started.elapsed().as_millis()
+    );
+    result
 }
 
 /// The slot for the one export that can run at a time - enforced, not

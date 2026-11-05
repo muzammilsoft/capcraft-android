@@ -80,7 +80,17 @@ pub fn start_export(
         .exporter
         .begin()
         .map_err(|_| MobileError::Busy("An export is already running.".to_owned()))?;
+    // Phase 2 export-delay diagnosis: stage timing, log-only. KG's
+    // exports take long to START even for short videos, and the app
+    // showed no timings at all, so every stage below logs its own
+    // milliseconds and its running total. Nothing here changes what
+    // the export does, only what it records.
+    let started = std::time::Instant::now();
     let request = session.export_request(&settings)?;
+    log::info!(
+        "export: timing export-request {}ms",
+        started.elapsed().as_millis()
+    );
     std::thread::Builder::new()
         .name("capcraft-export".to_owned())
         .spawn(move || {
@@ -93,6 +103,10 @@ pub fn start_export(
                     listener.on_progress(fraction);
                 }
             });
+            log::info!(
+                "export: timing render total {}ms",
+                started.elapsed().as_millis()
+            );
             match result {
                 Ok(path) => listener.on_done(path),
                 Err(message) => listener.on_failed(message, job.cancelled()),
@@ -166,6 +180,7 @@ impl MobileSession {
                 color_range: Default::default(),
                 hdr: false,
             };
+            let titles_started = std::time::Instant::now();
             let titles = context()
                 .map(|context| {
                     context
@@ -176,12 +191,29 @@ impl MobileSession {
                         .collect()
                 })
                 .unwrap_or_default();
+            // Phase 2: title rasterising is a suspect for the slow
+            // export start, so its cost is logged even when there are
+            // no text clips (then it should read near zero).
+            log::info!(
+                "export: timing titles {}ms",
+                titles_started.elapsed().as_millis()
+            );
+            let request_started = std::time::Instant::now();
             let mut request = concat_host::export::request(session, &spec, titles);
+            log::info!(
+                "export: timing flatten {}ms",
+                request_started.elapsed().as_millis()
+            );
+            let background_started = std::time::Instant::now();
             crate::background::add(
                 session.project(),
                 &canvas,
                 std::path::Path::new(session.path()),
                 &mut request.clips,
+            );
+            log::info!(
+                "export: timing background {}ms",
+                background_started.elapsed().as_millis()
             );
             request.width = width;
             request.height = height;
