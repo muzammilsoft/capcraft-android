@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -277,7 +278,7 @@ private fun TemplatePreview(template: TemplateInfoView) {
             }.getOrNull()
         }
     }
-    val aspect = (template.width.toFloat() / template.height.coerceAtLeast(1).toFloat()).coerceIn(0.5f, 3f)
+    val aspect = (template.width.toFloat() / template.height.coerceAtLeast(1u).toFloat()).coerceIn(0.5f, 3f)
     Box(
         Modifier.fillMaxWidth().aspectRatio(aspect).clip(RoundedCornerShape(8.dp)).background(Color(0xFF2A2A2A)),
         contentAlignment = Alignment.Center,
