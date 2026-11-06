@@ -181,8 +181,8 @@ impl MobileSession {
                     let encoder = concat_export::ExportEncoder::parse(&settings.encoder)
                         .unwrap_or_default();
                     match encoder {
-                        concat_export::ExportEncoder::NativeHevc => VideoCodec::Hevc,
-                        concat_export::ExportEncoder::NativeH264 => VideoCodec::H264,
+                        concat_export::ExportEncoder::NativeHevcOnly => VideoCodec::Hevc,
+                        concat_export::ExportEncoder::NativeH264Only => VideoCodec::H264,
                         _ => {
                             if settings.hevc {
                                 VideoCodec::Hevc
