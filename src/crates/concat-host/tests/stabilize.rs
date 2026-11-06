@@ -77,6 +77,7 @@ fn shoot(path: &Path) {
         threads: 0,
         software_only: false,
         exclude_component: None,
+        only_component: None,
     };
     let mut encoder = Encoder::create(path, WIDTH, HEIGHT, FrameRate::THIRTY, &options)
         .expect("the linked FFmpeg encodes");
@@ -153,6 +154,7 @@ fn export_to(session: &Session, output: &Path) -> String {
         crf: 12,
         preset: "ultrafast".to_owned(),
         codec: VideoCodec::H264,
+        encoder: Default::default(),
         ten_bit: false,
         rate_mode: RateMode::Vbr,
         bitrate_kbps: 0,

@@ -96,6 +96,7 @@ fn picture(path: &Path, rate: FrameRate, seconds: u32, codec: VideoCodec) {
         threads: 0,
         software_only: false,
         exclude_component: None,
+        only_component: None,
     };
     let mut encoder =
         Encoder::create(path, WIDTH, HEIGHT, rate, &options).expect("the linked FFmpeg encodes");
@@ -130,6 +131,7 @@ fn quadrants(path: &Path) {
         threads: 0,
         software_only: false,
         exclude_component: None,
+        only_component: None,
     };
     let mut encoder = Encoder::create(path, WIDTH, HEIGHT, FrameRate::THIRTY, &options)
         .expect("the linked FFmpeg encodes");
@@ -584,6 +586,7 @@ impl Studio {
             crf: 18,
             preset: "ultrafast".to_owned(),
             codec: VideoCodec::H264,
+            encoder: Default::default(),
             ten_bit: false,
             rate_mode: RateMode::Vbr,
             bitrate_kbps: 0,
@@ -734,6 +737,7 @@ fn an_export_draws_on_a_lent_compositor() {
         crf: 18,
         preset: "ultrafast".to_owned(),
         codec: VideoCodec::H264,
+        encoder: Default::default(),
         ten_bit: false,
         rate_mode: RateMode::Vbr,
         bitrate_kbps: 0,
@@ -1031,6 +1035,7 @@ fn solid(path: &Path, colour: [u8; 3]) {
         threads: 0,
         software_only: false,
         exclude_component: None,
+        only_component: None,
     };
     let mut encoder = Encoder::create(path, WIDTH, HEIGHT, FrameRate::THIRTY, &options)
         .expect("the linked FFmpeg encodes");
@@ -1163,6 +1168,7 @@ fn an_hlg_clip_exports_through_the_gpu_conversion() {
             threads: 0,
             software_only: false,
             exclude_component: None,
+            only_component: None,
         };
         let mut encoder = Encoder::create_mislabelled_hdr(
             &path,
@@ -1224,6 +1230,7 @@ fn an_hlg_timeline_exports_as_hdr_or_sdr() {
         threads: 0,
         software_only: false,
         exclude_component: None,
+        only_component: None,
     };
     {
         let mut encoder = Encoder::create_hdr(
@@ -1274,6 +1281,7 @@ fn an_hlg_timeline_exports_as_hdr_or_sdr() {
             crf: 12,
             preset: "ultrafast".to_owned(),
             codec,
+            encoder: Default::default(),
             ten_bit: false,
             rate_mode: RateMode::Vbr,
             bitrate_kbps: 0,

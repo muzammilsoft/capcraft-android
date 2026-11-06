@@ -337,6 +337,45 @@ impl RateMode {
     pub const ALL: [RateMode; 3] = [RateMode::Vbr, RateMode::Cbr, RateMode::Average];
 }
 
+/// Which native component a direct MediaCodec attempt runs (Phase 3):
+/// the chip encoder called through the NDK, not through FFmpeg. Kept
+/// here, not in the Android-only module, so the export plan can name
+/// one on any platform and the plan collapses to FFmpeg elsewhere.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NativeKind {
+    /// H.264 / AVC on Huawei's hardware component.
+    H264,
+    /// H.265 / HEVC on Huawei's hardware component: smaller files.
+    Hevc,
+}
+
+impl NativeKind {
+    /// The MIME type the format names.
+    pub fn mime(self) -> &'static str {
+        match self {
+            NativeKind::H264 => "video/avc",
+            NativeKind::Hevc => "video/hevc",
+        }
+    }
+
+    /// The MediaCodec component, pinned by name - never a generic ask,
+    /// so no other component can be picked up by mistake.
+    pub fn component(self) -> &'static str {
+        match self {
+            NativeKind::H264 => "OMX.hisi.video.encoder.avc",
+            NativeKind::Hevc => "OMX.hisi.video.encoder.hevc",
+        }
+    }
+
+    /// The name the export log and the Settings choice use.
+    pub fn label(self) -> &'static str {
+        match self {
+            NativeKind::H264 => "native-h264",
+            NativeKind::Hevc => "native-hevc",
+        }
+    }
+}
+
 /// Encoder settings.
 #[derive(Clone, Debug)]
 pub struct EncodeOptions {
@@ -382,8 +421,17 @@ pub struct EncodeOptions {
     /// A MediaCodec component a previous pass already stalled on, never
     /// tried again on the retry pass: on a phone the retry must try the
     /// other software component (c2 vs OMX), not the same one that just
-    /// took no frame for ten seconds. None otherwise.
+    /// took no frame for three seconds. None otherwise.
     pub exclude_component: Option<&'static str>,
+    /// One MediaCodec component and nothing else: a Settings choice that
+    /// pins the export to a single encoder for comparison (hisi, c2 or
+    /// Google). None tries the order [`attempts`] names. A pinned attempt
+    /// never retries inside the encoder: a stall on it ends that attempt,
+    /// and the export-level fallback is the next step. This is also the
+    /// only way the Google component is reached: `attempts` never names
+    /// it, so no default order can silently pick it up (Phase 3,
+    /// 2026-11-06: KG ordered Google as a manual test option only).
+    pub only_component: Option<&'static str>,
 }
 
 impl Default for EncodeOptions {
@@ -400,6 +448,7 @@ impl Default for EncodeOptions {
             threads: 0,
             software_only: false,
             exclude_component: None,
+            only_component: None,
         }
     }
 }
@@ -746,19 +795,26 @@ enum Attempt {
 
 /// The ways to ask `encoder_name`, in order.
 ///
-/// KG fork (2026-11-04, binding): the Google encoder is NEVER used, on
-/// any path. For H.264 on Android the order is pinned, component by
-/// component, so no generic ask can silently pick a Google component:
-/// Huawei's hardware encoder first, then Android's Codec2 component,
-/// and nothing after that - the export-level MPEG-4 fallback is the
-/// third and last step, not another MediaCodec component. A generic
-/// AsAsked/Plain ask is kept only for HEVC/AV1, which name no Google
-/// component and are not the Phase 1 export path.
+/// KG fork (2026-11-04, binding, amended 2026-11-06): the Google
+/// encoder is NEVER used by a default order, on any path. For H.264 on
+/// Android the order is pinned, component by component, so no generic
+/// ask can silently pick a Google component: Huawei's hardware encoder
+/// first, then Android's Codec2 component, and nothing after that - the
+/// export-level MPEG-4 fallback is the third and last step, not another
+/// MediaCodec component. The Google component
+/// (OMX.google.h264.encoder) is reachable ONLY through
+/// [`EncodeOptions::only_component`], i.e. KG's explicit manual
+/// "H.264 Google only" Settings choice in 0.0.12-beta, ordered
+/// 2026-11-06 as an experiment on his Huawei after the earlier ban.
+/// A generic AsAsked/Plain ask is kept only for HEVC/AV1, which name
+/// no Google component and are not the Phase 1 export path.
 fn attempts(encoder_name: &str) -> &'static [Attempt] {
     use Attempt::*;
     match encoder_name {
-        // KG fork 2026-11-04: OMX.hisi first, c2 second, no Google ever.
-        // Do NOT re-add OMX.google.h264.encoder here, even as a fallback.
+        // KG fork 2026-11-04: OMX.hisi first, c2 second, no Google ever
+        // in a default order. Do NOT add OMX.google.h264.encoder to
+        // this list: it is reachable only as a pinned `only_component`
+        // (KG's manual test option, 2026-11-06).
         "h264_mediacodec" => &[
             Component("OMX.hisi.video.encoder.avc"),
             Component("c2.android.avc.encoder"),
@@ -787,11 +843,17 @@ impl Attempt {
 /// one, or with [`EncodeOptions::software_only`] those on the CPU alone - on
 /// a phone straight to Android's software component, past a chip that
 /// stopped part way through the last try, and on a desktop the software
-/// encoders, with NVENC, Quick Sync, AMF and the rest passed over.
+/// encoders, with NVENC, Quick Sync, AMF and the rest passed over. With
+/// [`EncodeOptions::only_component`] set, the pinned component alone:
+/// one encoder, tried once, which is how a manual Settings choice
+/// (hisi, c2 or Google, Phase 3) reaches exactly the encoder it names.
 fn allowed_attempts(
     encoder_name: &'static str,
     options: &EncodeOptions,
-) -> impl Iterator<Item = Attempt> {
+) -> Vec<Attempt> {
+    if let Some(pinned) = options.only_component {
+        return vec![Attempt::Component(pinned)];
+    }
     let software_only = options.software_only;
     let excluded = options.exclude_component;
     attempts(encoder_name)
@@ -802,6 +864,7 @@ fn allowed_attempts(
             Attempt::Component(name) => Some(*name) != excluded,
             _ => true,
         })
+        .collect()
 }
 
 /// The most a plain ask puts on a phone's chip, in kb/s: room for a clean
@@ -1601,7 +1664,7 @@ impl Encoder {
                         // shared log answers "which encoder ran" without
                         // guessing from the file size.
                         log::info!(
-                            "export encoder: {name} component={component:?} hardware={hardware} (Phase 1 order: hisi, c2, then MPEG-4; no Google encoder)"
+                            "export encoder: {name} component={component:?} hardware={hardware}"
                         );
                         opened = Some((name, codec, encoder, pixel_format, hardware, component));
                         break 'encoders;
@@ -1873,8 +1936,11 @@ impl Encoder {
 /// How long an encoder may keep answering "try again" to one frame, its
 /// finished packets read out between asks, before the export calls it
 /// stuck. A phone's MediaCodec encoder frees an input buffer within a few
-/// milliseconds of its output being read; ten seconds is a stall.
-const ENCODER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
+/// milliseconds of its output being read; three seconds is a stall.
+/// (Phase 3, 2026-11-06: ten seconds before; the 2026-11-06 device log
+/// proved hisi and c2 each stall after 4-5 frames, so the old patience
+/// cost twenty seconds of dead waiting on every export.)
+const ENCODER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(3);
 /// The pause between two asks, so a busy hardware encoder is waited for
 /// rather than spun on.
 const ENCODER_WAIT: std::time::Duration = std::time::Duration::from_millis(2);
@@ -2374,6 +2440,7 @@ mod tests {
             threads: 0,
             software_only: false,
             exclude_component: None,
+            only_component: None,
         };
         let rate = FrameRate::new(concat_core::time::Rational::new(25, 1));
         const FRAMES: u32 = 150;
@@ -2492,9 +2559,10 @@ mod tests {
 
     /// Each kind of encoder is handed the pictures it reads, and ten bits
     /// only where it takes them.
-    /// KG fork (2026-11-04): H.264 on a phone is asked component by
-    /// component - Huawei's hardware encoder first, then Codec2 - and
-    /// never the Google encoder, on any path.
+    /// KG fork (2026-11-04, amended 2026-11-06): H.264 on a phone is
+    /// asked component by component - Huawei's hardware encoder first,
+    /// then Codec2 - and never the Google encoder in a default order:
+    /// Google is reachable only as a pinned `only_component`.
     #[test]
     fn a_phone_encoder_is_asked_again_before_the_export_fails() {
         assert_eq!(
@@ -2515,13 +2583,15 @@ mod tests {
     /// An export going again on the CPU after a phone's chip stopped part
     /// way through asks Android's own software components only, never the
     /// chip again; on a desktop, the software encoders only (#491).
-    /// KG fork (2026-11-04): the Google encoder is gone, so the
-    /// software-only list for H.264 is Codec2 alone.
+    /// KG fork (2026-11-04, amended 2026-11-06): the Google encoder
+    /// is out of every default order, so the software-only list for
+    /// H.264 is Codec2 alone; Google is a pinned manual option only.
     #[test]
     fn a_stalled_chip_is_passed_over_for_the_cpu() {
         let cpu = EncodeOptions {
             software_only: true,
             exclude_component: None,
+            only_component: None,
             ..EncodeOptions::default()
         };
         let asked = |name: &'static str, options: &EncodeOptions| -> Vec<Attempt> {
@@ -2555,6 +2625,41 @@ mod tests {
         assert!(Attempt::AsAsked.in_software("libx265"));
     }
 
+    /// A pinned component is the whole list, tried once: the manual
+    /// Settings choices (hisi, c2, Google) reach exactly the encoder
+    /// they name, and the Google component is reachable no other way.
+    /// (Phase 3, 2026-11-06: KG ordered Google as a manual test option
+    /// only, after the earlier ban on it in every default order.)
+    #[test]
+    fn a_pinned_component_is_the_whole_list() {
+        for pinned in [
+            "OMX.hisi.video.encoder.avc",
+            "c2.android.avc.encoder",
+            "OMX.google.h264.encoder",
+        ] {
+            let options = EncodeOptions {
+                only_component: Some(pinned),
+                ..EncodeOptions::default()
+            };
+            assert_eq!(
+                allowed_attempts("h264_mediacodec", &options),
+                [Attempt::Component(pinned)],
+                "{pinned} pinned"
+            );
+        }
+        // Unpinned, Google is never in the list.
+        let options = EncodeOptions::default();
+        assert!(
+            !allowed_attempts("h264_mediacodec", &options)
+                .contains(&Attempt::Component("OMX.google.h264.encoder")),
+            "no default order names Google"
+        );
+        assert_eq!(
+            allowed_attempts("h264_mediacodec", &options),
+            attempts("h264_mediacodec")
+        );
+    }
+
     /// Only the hardware stopping is one an export goes again for: the CPU
     /// stopping, or anything else failing, would fail again.
     #[test]
@@ -2562,7 +2667,7 @@ mod tests {
         let stall = |hardware| Error::Stalled {
             operation: "encode",
             path: PathBuf::from("out.mp4"),
-            detail: "the encoder took no frame for 10 seconds".to_owned(),
+            detail: "the encoder took no frame for 3 seconds".to_owned(),
             hardware,
         };
         assert!(stall(true).stalled_on_hardware());
@@ -2577,7 +2682,7 @@ mod tests {
         // reads are the same ones they reported.
         assert_eq!(
             stall(true).to_string(),
-            "encode failed for out.mp4: the encoder took no frame for 10 seconds"
+            "encode failed for out.mp4: the encoder took no frame for 3 seconds"
         );
     }
 
@@ -2594,6 +2699,7 @@ mod tests {
             preset: "ultrafast".to_owned(),
             software_only: true,
             exclude_component: None,
+            only_component: None,
             ..EncodeOptions::default()
         };
         let mut encoder = Encoder::create(&path, 64, 64, FrameRate::THIRTY, &options)
@@ -2881,6 +2987,7 @@ mod tests {
                     threads: 0,
                     software_only: false,
                     exclude_component: None,
+                    only_component: None,
                 };
                 let mut encoder = Encoder::create(&path, 64, 64, FrameRate::THIRTY, &options)
                     .unwrap_or_else(|error| panic!("{} {ten_bit}: {error}", codec.label()));
@@ -2927,6 +3034,7 @@ mod tests {
             threads: 0,
             software_only: false,
             exclude_component: None,
+            only_component: None,
         };
         let refused = std::env::temp_dir().join("concat-encode-hdr-h264.mp4");
         assert!(

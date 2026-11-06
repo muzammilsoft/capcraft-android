@@ -90,6 +90,10 @@ import io.github.artcraftandroid.capcraft.ui.Type
 import io.github.artcraftandroid.capcraft.ui.common.Toast
 import io.github.artcraftandroid.capcraft.ui.common.exportBackup
 import io.github.artcraftandroid.capcraft.ui.common.restoreBackup
+import io.github.artcraftandroid.capcraft.ui.export.EXPORT_ENCODER_OPTIONS
+import io.github.artcraftandroid.capcraft.ui.export.exportEncoderLabel
+import io.github.artcraftandroid.capcraft.ui.export.exportEncoderSetting
+import io.github.artcraftandroid.capcraft.ui.export.setExportEncoderSetting
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1036,6 +1040,10 @@ private fun MeTab(onLicences: () -> Unit, onAbout: () -> Unit, onCleared: (Strin
     val version = remember { appVersion(context) }
     var cache by remember { mutableStateOf<Long?>(null) }
     var clearing by remember { mutableStateOf(false) }
+    // Phase 3: the export encoder choice, kept on the phone; tapping
+    // its row opens the eight options below it.
+    var encoderExpanded by remember { mutableStateOf(false) }
+    var encoderChoice by remember { mutableStateOf(exportEncoderSetting(context)) }
     // Phase 1: backup without opening a project, so it can be done
     // right before an uninstall. Export first, uninstall second,
     // restore after reinstall, from this same Settings tab.
@@ -1060,6 +1068,31 @@ private fun MeTab(onLicences: () -> Unit, onAbout: () -> Unit, onCleared: (Strin
                 }
             }
             SettingRow("Restore backup", null) { restore.launch(arrayOf("application/zip", "application/octet-stream")) }
+            // Phase 3: which encoder an export runs on. The row shows
+            // the choice; tapping it opens every option with its plain
+            // explanation, so the choice needs no asking.
+            SettingRow("Export encoder", exportEncoderLabel(encoderChoice)) { encoderExpanded = !encoderExpanded }
+            if (encoderExpanded) {
+                EXPORT_ENCODER_OPTIONS.forEach { option ->
+                    Column(
+                        Modifier.fillMaxWidth().clickable {
+                            setExportEncoderSetting(context, option.id)
+                            encoderChoice = option.id
+                        }.padding(horizontal = 20.dp, vertical = 10.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                option.title,
+                                style = ink(15f, if (option.id == encoderChoice) FontWeight.SemiBold else FontWeight.Normal),
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (option.id == encoderChoice) Glyph(LucideIcons.Check, Home.Ink, size = 20.dp)
+                        }
+                        Text(option.explanation, style = ink(13f, color = Home.Muted))
+                    }
+                    Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp).height(1.dp).background(Home.Hairline))
+                }
+            }
             SettingRow("Licences", null, onLicences)
             SettingRow("About CapCraft", null, onAbout)
             SettingRow("Version", version, null)

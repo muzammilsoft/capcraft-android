@@ -429,6 +429,7 @@ mod tests {
             threads: 0,
             software_only: false,
             exclude_component: None,
+            only_component: None,
         };
         let rate = FrameRate::from_int(25);
         for (name, hdr, want) in [

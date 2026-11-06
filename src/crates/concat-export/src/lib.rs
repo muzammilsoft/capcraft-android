@@ -446,6 +446,12 @@ pub struct ExportRequest {
     /// request does not say.
     #[serde(default, deserialize_with = "codec_by_name")]
     pub codec: VideoCodec,
+    /// Which encoder runs the export, by name (see [`ExportEncoder`]):
+    /// "auto", "classic", "mpeg4", "ffmpeg-hisi", "ffmpeg-c2",
+    /// "ffmpeg-google", "native-h264" or "native-hevc". "auto" when a
+    /// request does not say.
+    #[serde(default, deserialize_with = "encoder_by_name")]
+    pub encoder: ExportEncoder,
     /// Ten bits a channel rather than eight.
     #[serde(default)]
     pub ten_bit: bool,
@@ -540,6 +546,198 @@ fn rate_mode_by_name<'de, D: serde::Deserializer<'de>>(
         .find(|mode| mode.name() == name)
         .copied()
         .ok_or_else(|| serde::de::Error::custom(format!("unknown rate mode {name:?}: vbr or cbr")))
+}
+
+/// Which encoder an export runs on: the Settings choice in 0.0.12-beta
+/// (Phase 3). Every choice is a real path, not a label, and every one
+/// but MPEG-4-only falls back to MPEG-4 when its encoder fails, so an
+/// export never dies just because a comparison encoder stalled.
+///
+/// The Google encoder is a MANUAL choice only, on KG's explicit
+/// 2026-11-06 order ("try adding it, if it works that is a gain") after
+/// his earlier ban: it is in no Auto order and no Classic order, and
+/// whether it encodes on his Huawei is unproven until he tests it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ExportEncoder {
+    /// Native H.264 first, then MPEG-4: the new default path. The fast
+    /// hope with the proven fallback.
+    #[default]
+    Auto,
+    /// hisi, then c2, then MPEG-4: the old 0.0.11 order, kept ONLY so KG
+    /// can compare old against new.
+    ClassicAuto,
+    /// Straight to the proven software encoder, no stall waits.
+    Mpeg4Only,
+    /// Huawei's chip H.264 through FFmpeg, for comparison.
+    FfmpegHisiOnly,
+    /// Android's software H.264 through FFmpeg, for comparison.
+    FfmpegC2Only,
+    /// Google's software H.264 through FFmpeg, a manual experiment on
+    /// this Huawei - unproven until the device test.
+    FfmpegGoogleOnly,
+    /// The chip's H.264 called directly (no FFmpeg), MPEG-4 on failure.
+    NativeH264Only,
+    /// The chip's HEVC called directly (no FFmpeg), MPEG-4 on failure.
+    NativeHevcOnly,
+}
+
+impl ExportEncoder {
+    /// Every choice, in the order Settings lists them.
+    pub const ALL: [ExportEncoder; 8] = [
+        ExportEncoder::Auto,
+        ExportEncoder::ClassicAuto,
+        ExportEncoder::Mpeg4Only,
+        ExportEncoder::FfmpegHisiOnly,
+        ExportEncoder::FfmpegC2Only,
+        ExportEncoder::FfmpegGoogleOnly,
+        ExportEncoder::NativeH264Only,
+        ExportEncoder::NativeHevcOnly,
+    ];
+
+    /// The name a request or the Settings store.
+    pub fn name(self) -> &'static str {
+        match self {
+            ExportEncoder::Auto => "auto",
+            ExportEncoder::ClassicAuto => "classic",
+            ExportEncoder::Mpeg4Only => "mpeg4",
+            ExportEncoder::FfmpegHisiOnly => "ffmpeg-hisi",
+            ExportEncoder::FfmpegC2Only => "ffmpeg-c2",
+            ExportEncoder::FfmpegGoogleOnly => "ffmpeg-google",
+            ExportEncoder::NativeH264Only => "native-h264",
+            ExportEncoder::NativeHevcOnly => "native-hevc",
+        }
+    }
+
+    /// The choice a stored name means, or `None` for one nobody stores.
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .find(|mode| mode.name() == name.trim().to_ascii_lowercase())
+            .copied()
+    }
+}
+
+/// An encoder named the way [`ExportEncoder::name`] names it, refusing
+/// a name the engine does not know rather than quietly exporting with
+/// the default.
+fn encoder_by_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ExportEncoder, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    ExportEncoder::parse(&name).ok_or_else(|| {
+        serde::de::Error::custom(format!(
+            "unknown export encoder {name:?}: auto, classic, mpeg4, ffmpeg-hisi, ffmpeg-c2, ffmpeg-google, native-h264 or native-hevc"
+        ))
+    })
+}
+
+/// One step of an export's encoder plan: which encoder writes this
+/// attempt, and what codec it writes. Built by [`attempt_plan`]; a
+/// `pin` is one FFmpeg MediaCodec component and nothing else, a
+/// `native` is one chip encoder called directly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct AttemptSpec {
+    /// The name the export log uses: "native-h264", "ffmpeg-hisi",
+    /// "mpeg4", and so on.
+    pub label: &'static str,
+    /// What this attempt writes.
+    pub codec: VideoCodec,
+    /// The FFmpeg MediaCodec component, when this attempt is one.
+    pub pin: Option<&'static str>,
+    /// The chip encoder called directly, when this attempt is native.
+    pub native: Option<concat_media::NativeKind>,
+}
+
+/// The attempts an export runs, in order, for `encoder` and `codec`:
+/// each step is tried once, in full, and the next runs only when the
+/// one before it failed, until one writes the whole file or MPEG-4 -
+/// the last step of every plan that has one - has had its go. The
+/// compositor is built once and lent to every attempt (Phase 3 quick
+/// win: the old code built a fresh one per retry).
+///
+/// On any platform but Android there is no native encoder and no hisi
+/// or c2 component, so every choice collapses to the one FFmpeg attempt
+/// the machine has always run - the Settings choices are an Android
+/// feature, and a desktop export must not change because of them. An
+/// HDR timeline never goes native either: the native encoder is SDR
+/// eight-bit only, so Auto on HDR runs the classic order instead.
+pub(crate) fn attempt_plan(
+    encoder: ExportEncoder,
+    codec: VideoCodec,
+    hdr: bool,
+) -> Vec<AttemptSpec> {
+    const MPEG4: AttemptSpec = AttemptSpec {
+        label: "mpeg4",
+        codec: VideoCodec::Mpeg4,
+        pin: None,
+        native: None,
+    };
+    const FFMPEG: AttemptSpec = AttemptSpec {
+        label: "ffmpeg",
+        codec: VideoCodec::H264,
+        pin: None,
+        native: None,
+    };
+    if !cfg!(target_os = "android") {
+        // No native encoder, no named components: the one FFmpeg
+        // attempt, whatever Settings said.
+        return vec![AttemptSpec { codec, ..FFMPEG }];
+    }
+    let native_h264 = AttemptSpec {
+        label: "native-h264",
+        codec: VideoCodec::H264,
+        pin: None,
+        native: Some(concat_media::NativeKind::H264),
+    };
+    let native_hevc = AttemptSpec {
+        label: "native-hevc",
+        codec: VideoCodec::Hevc,
+        pin: None,
+        native: Some(concat_media::NativeKind::Hevc),
+    };
+    let hisi = AttemptSpec {
+        label: "ffmpeg-hisi",
+        codec: VideoCodec::H264,
+        pin: Some("OMX.hisi.video.encoder.avc"),
+        native: None,
+    };
+    let c2 = AttemptSpec {
+        label: "ffmpeg-c2",
+        codec: VideoCodec::H264,
+        pin: Some("c2.android.avc.encoder"),
+        native: None,
+    };
+    let google = AttemptSpec {
+        label: "ffmpeg-google",
+        codec: VideoCodec::H264,
+        pin: Some("OMX.google.h264.encoder"),
+        native: None,
+    };
+    match encoder {
+        ExportEncoder::Auto => {
+            if hdr {
+                // Native is SDR-only; HDR runs the classic order.
+                vec![hisi, c2, MPEG4]
+            } else {
+                match codec {
+                    VideoCodec::H264 => vec![native_h264, MPEG4],
+                    VideoCodec::Hevc => vec![native_hevc, MPEG4],
+                    _ => vec![AttemptSpec { codec, ..FFMPEG }],
+                }
+            }
+        }
+        ExportEncoder::ClassicAuto => match codec {
+            VideoCodec::H264 => vec![hisi, c2, MPEG4],
+            VideoCodec::Hevc => vec![AttemptSpec { codec, ..FFMPEG }, MPEG4],
+            _ => vec![AttemptSpec { codec, ..FFMPEG }],
+        },
+        ExportEncoder::Mpeg4Only => vec![MPEG4],
+        ExportEncoder::FfmpegHisiOnly => vec![hisi, MPEG4],
+        ExportEncoder::FfmpegC2Only => vec![c2, MPEG4],
+        ExportEncoder::FfmpegGoogleOnly => vec![google, MPEG4],
+        ExportEncoder::NativeH264Only => vec![native_h264, MPEG4],
+        ExportEncoder::NativeHevcOnly => vec![native_hevc, MPEG4],
+    }
 }
 
 /// What the export loop calls to report and to ask "should I stop?".
@@ -1307,55 +1505,82 @@ pub fn render_on(
         render_started.elapsed().as_millis()
     );
     let result = (|| -> Result<(), String> {
-        // KG fork (2026-11-01), Android only: every MediaCodec encoder
-        // on the Y8p stalls after 4-5 frames, at 720p and at 480p, on a
-        // 59-second cut and on a 13-second text-only cut, while preview
-        // plays smoothly - so the stall is in MediaCodec, not in the
-        // cut. When the picture render fails with that stall, try once
-        // more with MPEG-4, FFmpeg's own encoder, which never touches
-        // MediaCodec. Same MP4 container, same output path, just a
-        // different video codec inside it, slower and larger than
-        // H.264, but a file that actually finishes. Any other failure,
-        // and any platform but Android, keeps the original error.
-        match render_picture(
-            request,
-            compositor,
-            rate,
-            total_frames,
-            &visible,
-            transitions.clone(),
-            &silent,
-            &mut reporter,
-        ) {
-            Ok(()) => {}
-            Err(error) if cfg!(target_os = "android")
-                && request.codec == VideoCodec::H264
-                && (error.contains("took no frame")
-                    || error.contains("failed too")
-                    || error.contains("mediacodec encoder open failed")) =>
-            {
-                log::warn!("export: H.264 failed with {error}; trying MPEG-4, which does not use MediaCodec");
-                let fallback = ExportRequest {
-                    codec: VideoCodec::Mpeg4,
-                    ..request.clone()
-                };
-                render_picture(
-                    &fallback,
-                    None,
-                    rate,
-                    total_frames,
-                    &visible,
-                    transitions,
-                    &silent,
-                    &mut reporter,
-                )
-                .map_err(|fallback_error| {
-                    format!("{error}; MPEG-4 fallback also failed: {fallback_error}")
-                })?;
-                log::info!("export: MPEG-4 fallback succeeded after the MediaCodec stall");
+        // Phase 3 (2026-11-06): the picture is rendered once per
+        // encoder attempt, in the order `attempt_plan` names for the
+        // Settings choice - native first on Auto, hisi/c2 on Classic,
+        // one pinned component on a manual choice - and MPEG-4 last,
+        // FFmpeg's own encoder, which never touches MediaCodec. The
+        // 2026-11-06 device log proved hisi stalls after 4 frames and
+        // c2 after 5, each costing the old ten-second patience, so each
+        // attempt is tried once and timed, and the compositor is built
+        // once and lent to every attempt instead of rebuilt per retry.
+        // A cancelled export stops at once, not at the next attempt.
+        let plan = attempt_plan(request.encoder, request.codec, request.hdr);
+        log::info!(
+            "export: encoder selected={} codec={:?} attempts={}",
+            request.encoder.name(),
+            request.codec,
+            plan.iter()
+                .map(|attempt| attempt.label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let compositor_started = std::time::Instant::now();
+        let mut compositor = match compositor {
+            Some(lent) => lent,
+            None => best_compositor()?,
+        };
+        log::info!(
+            "export: timing compositor {}ms",
+            compositor_started.elapsed().as_millis()
+        );
+        let mut last_error: Option<String> = None;
+        let mut produced: Option<&'static str> = None;
+        for attempt in &plan {
+            let attempt_started = std::time::Instant::now();
+            match render_picture(
+                request,
+                &mut compositor,
+                rate,
+                total_frames,
+                &visible,
+                transitions.clone(),
+                &silent,
+                &mut reporter,
+                attempt,
+            ) {
+                Ok(frames) => {
+                    let ms = attempt_started.elapsed().as_millis();
+                    let fps = if ms > 0 {
+                        frames as f64 / (ms as f64 / 1000.0)
+                    } else {
+                        0.0
+                    };
+                    log::info!(
+                        "export: encoder final={} frames={frames} attempt_ms={ms} encode_fps={fps:.1} total_ms={}",
+                        attempt.label,
+                        render_started.elapsed().as_millis()
+                    );
+                    produced = Some(attempt.label);
+                    break;
+                }
+                Err(error) => {
+                    if error == "export cancelled" {
+                        return Err(error);
+                    }
+                    log::warn!(
+                        "export: encoder attempt {} failed after {}ms: {error}",
+                        attempt.label,
+                        attempt_started.elapsed().as_millis()
+                    );
+                    last_error = Some(error);
+                }
             }
-            Err(error) => return Err(error),
         }
+        let Some(final_encoder) = produced else {
+            return Err(last_error.unwrap_or_else(|| "no encoder could write the video".to_owned()));
+        };
+        log::info!("export: video written with {final_encoder}");
 
         let finished = if sound.is_empty() {
             &silent
@@ -1795,28 +2020,111 @@ fn headless<T>(draw: impl FnOnce(&mut WgpuCompositor) -> T) -> Result<T, String>
     Ok(draw(&mut gpu))
 }
 
-/// Composites every frame of the timeline into a soundless video file.
+/// What one picture pass writes through: the FFmpeg encoder, or the
+/// chip called directly for a native attempt. One loop draws for both,
+/// so the frame plan, the decoders and the device-loss recovery are
+/// written once.
+enum PictureSink {
+    Ffmpeg(Encoder),
+    #[cfg(target_os = "android")]
+    Native(concat_media::native_encoder::NativeEncoder),
+}
+
+impl PictureSink {
+    fn write_frame(&mut self, frame: &Frame) -> std::result::Result<(), concat_media::Error> {
+        match self {
+            PictureSink::Ffmpeg(encoder) => encoder.write_frame(frame),
+            #[cfg(target_os = "android")]
+            PictureSink::Native(encoder) => encoder.write_frame(frame),
+        }
+    }
+
+    fn finish(&mut self) -> std::result::Result<(), concat_media::Error> {
+        match self {
+            PictureSink::Ffmpeg(encoder) => encoder.finish(),
+            #[cfg(target_os = "android")]
+            PictureSink::Native(encoder) => encoder.finish(),
+        }
+    }
+
+    /// Frames accepted so far, for the per-attempt log.
+    fn written(&self) -> u64 {
+        match self {
+            PictureSink::Ffmpeg(encoder) => encoder.written(),
+            #[cfg(target_os = "android")]
+            PictureSink::Native(encoder) => encoder.written(),
+        }
+    }
+
+    /// The MediaCodec component that took the job, when one was asked
+    /// for by name; None for a native attempt.
+    fn component(&self) -> Option<&'static str> {
+        match self {
+            PictureSink::Ffmpeg(encoder) => encoder.component(),
+            #[cfg(target_os = "android")]
+            PictureSink::Native(_) => None,
+        }
+    }
+
+    /// One line for the export log: which encoder is doing the work.
+    fn describe(&self) -> String {
+        match self {
+            PictureSink::Ffmpeg(encoder) => format!(
+                "{} ({}, component {:?})",
+                encoder.encoder_name(),
+                if encoder.on_hardware() {
+                    "hardware"
+                } else {
+                    "software"
+                },
+                encoder.component()
+            ),
+            #[cfg(target_os = "android")]
+            PictureSink::Native(encoder) => {
+                format!("{} (hardware, direct MediaCodec)", encoder.label())
+            }
+        }
+    }
+
+    /// Whether this sink is the chip called directly: a native attempt
+    /// never goes again inside the pass loop.
+    fn is_native(&self) -> bool {
+        match self {
+            PictureSink::Ffmpeg(_) => false,
+            #[cfg(target_os = "android")]
+            PictureSink::Native(_) => true,
+        }
+    }
+}
+
+/// Composites every frame of the timeline into a soundless video file,
+/// with one encoder attempt (`attempt`): the sink it writes through is
+/// the FFmpeg encoder for that attempt, or the chip called directly for
+/// a native one. Returns the frames written. The compositor is lent by
+/// the caller and kept across attempts, so a retry never rebuilds it.
 fn render_picture(
     request: &ExportRequest,
-    compositor: Option<WgpuCompositor>,
+    compositor: &mut WgpuCompositor,
     rate: FrameRate,
     total_frames: i64,
     visible: &[&ExportClip],
     transitions: Vec<TransitionSpan>,
     destination: &Path,
     reporter: &mut Reporter<'_>,
-) -> Result<(), String> {
+    attempt: &AttemptSpec,
+) -> Result<u64, String> {
     // Phase 2: GPU-device creation and timeline building are the two
-    // suspects inside the picture pass; time them separately.
+    // suspects inside the picture pass; time them separately. (Phase 3:
+    // the compositor is built once in `render_on` and lent here, so its
+    // timing is logged there, not per attempt.)
     let picture_started = std::time::Instant::now();
     let effect_offset = quantise(request.effect_time_offset, rate);
-    let mut compositor = match compositor {
-        Some(lent) => lent,
-        None => best_compositor()?,
-    };
     log::info!(
-        "export: timing compositor {}ms",
-        picture_started.elapsed().as_millis()
+        "export: encoder attempt {} (codec {:?}) at {}x{}",
+        attempt.label,
+        attempt.codec,
+        request.width,
+        request.height
     );
     // Which chip and API the file is drawn on: the first thing a report of
     // an export gone wrong needs to say, and until now could not (#202).
@@ -1837,7 +2145,7 @@ fn render_picture(
         request.height,
         request.rate_num,
         request.rate_den,
-        request.codec,
+        attempt.codec,
         request.crf,
         request.preset,
         request.bitrate_kbps,
@@ -1880,7 +2188,7 @@ fn render_picture(
     let mut options = EncodeOptions {
         crf: request.crf,
         preset: request.preset.clone(),
-        codec: request.codec,
+        codec: attempt.codec,
         rate_mode: request.rate_mode,
         bitrate_kbps: request.bitrate_kbps,
         ten_bit: request.ten_bit,
@@ -1889,6 +2197,7 @@ fn render_picture(
         threads: 0,
         software_only: false,
         exclude_component: None,
+        only_component: attempt.pin,
     };
     // An HDR file comes out of the compositor as its signal, sixteen bits a
     // channel; anything else, SDR - an HDR timeline's tone-mapped.
@@ -1906,6 +2215,48 @@ fn render_picture(
     // through a pool that keeps the reader rolling where it can.
     let sought = concat_media::ReaderPool::with_defaults();
 
+    // The sink this attempt writes through: the FFmpeg encoder for the
+    // attempt's codec and pinned component, or the chip called directly
+    // for a native attempt. One sink per pass; a native attempt has one
+    // pass only, and a pinned FFmpeg attempt never retries inside the
+    // encoder (see `again_in_software`).
+    let make_sink = |options: &EncodeOptions| -> Result<PictureSink, String> {
+        if let Some(kind) = attempt.native {
+            #[cfg(target_os = "android")]
+            {
+                if hdr {
+                    return Err(
+                        "the native encoder writes SDR only; an HDR timeline needs the classic encoder"
+                            .to_owned(),
+                    );
+                }
+                let fps = f64::from(request.rate_num) / f64::from(request.rate_den.max(1));
+                return concat_media::native_encoder::NativeEncoder::create(
+                    destination,
+                    request.width,
+                    request.height,
+                    fps,
+                    request.bitrate_kbps,
+                    kind,
+                )
+                .map(PictureSink::Native)
+                .map_err(|error| error.to_string());
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                let _ = kind;
+                return Err("the native encoder is Android-only".to_owned());
+            }
+        }
+        let sink = if hdr {
+            Encoder::create_hdr(destination, request.width, request.height, rate, options, signal)
+        } else {
+            Encoder::create(destination, request.width, request.height, rate, options)
+        }
+        .map_err(|error| failed_encoding(&error, options))?;
+        Ok(PictureSink::Ffmpeg(sink))
+    };
+
     // Each pass renders the whole cut from its first frame. There is a
     // second only when the first one's hardware encoder stopped taking
     // frames part way through (#491): what it took is in a file it will
@@ -1917,28 +2268,10 @@ fn render_picture(
         } else {
             "rendering"
         };
-        let mut encoder = if hdr {
-            Encoder::create_hdr(
-                destination,
-                request.width,
-                request.height,
-                rate,
-                &options,
-                signal,
-            )
-        } else {
-            Encoder::create(destination, request.width, request.height, rate, &options)
-        }
-        .map_err(|error| failed_encoding(&error, &options))?;
+        let mut sink = make_sink(&options)?;
         log::info!(
-            "export: encoding with {} ({}, component {:?}) at {}x{}",
-            encoder.encoder_name(),
-            if encoder.on_hardware() {
-                "hardware"
-            } else {
-                "software"
-            },
-            encoder.component(),
+            "export: encoding with {} at {}x{}",
+            sink.describe(),
             request.width,
             request.height
         );
@@ -2093,7 +2426,7 @@ fn render_picture(
             // were never copied, and now their passes are not either.
             let mut composed = composite_treated(
                 &mut EffectClock {
-                    inner: &mut compositor,
+                    inner: &mut *compositor,
                     offset: effect_offset,
                 },
                 &frame_plan,
@@ -2109,10 +2442,10 @@ fn render_picture(
                     adapter.name,
                     time.as_f64(),
                 );
-                compositor = recovered(losses, hdr)?;
+                *compositor = recovered(losses, hdr)?;
                 composed = composite_treated(
                     &mut EffectClock {
-                        inner: &mut compositor,
+                        inner: &mut *compositor,
                         offset: effect_offset,
                     },
                     &frame_plan,
@@ -2120,11 +2453,21 @@ fn render_picture(
                     &transitions,
                 );
             }
-            if let Err(error) = encoder.write_frame(&composed) {
+            if let Err(error) = sink.write_frame(&composed) {
                 // The stopped encoder is closed before the file is opened
                 // again, so the chip has its session back.
-                let component = encoder.component();
-                drop(encoder);
+                let component = sink.component();
+                let frames = sink.written();
+                let native = sink.is_native();
+                drop(sink);
+                if native {
+                    // A native attempt has one pass: the next attempt in
+                    // the plan (MPEG-4) is the fallback, not a re-render
+                    // on the same chip.
+                    return Err(format!(
+                        "{error} (native encoder, {frames} frames written)"
+                    ));
+                }
                 again_in_software(&error, &mut options, component, index, total_frames)?;
                 reporter.emit(0, total_frames, RENDERING_IN_SOFTWARE);
                 continue 'pass;
@@ -2141,14 +2484,22 @@ fn render_picture(
             }
         }
 
-        match encoder.finish() {
+        match sink.finish() {
             Ok(()) => {
-                log::info!("export: video pass finished, {} frames written", total_frames);
-                return Ok(());
+                let frames = sink.written();
+                log::info!("export: video pass finished, {frames} frames written");
+                return Ok(frames);
             }
             Err(error) => {
-                let component = encoder.component();
-                drop(encoder);
+                let component = sink.component();
+                let frames = sink.written();
+                let native = sink.is_native();
+                drop(sink);
+                if native {
+                    return Err(format!(
+                        "{error} (native encoder, {frames} frames written)"
+                    ));
+                }
                 again_in_software(&error, &mut options, component, total_frames, total_frames)?;
                 reporter.emit(0, total_frames, RENDERING_IN_SOFTWARE);
             }
@@ -2164,7 +2515,7 @@ pub const RENDERING_IN_SOFTWARE: &str = "rendering in software";
 /// Whether an export goes again after its encoder failed with `error`,
 /// `frame` frames of `total` in, having opened it with `options`: once,
 /// and only when the encoder stalled - took no frame, or held its last
-/// frames, for ten seconds. KG fork (2026-10-31): the old rule retried
+/// frames, for three seconds. KG fork (2026-10-31): the old rule retried
 /// only a stall on the platform's hardware encoder (#491), but on a phone
 /// the first pass may already be a MediaCodec software component (the
 /// hardware ask and the plain ask both refused to open, so the component
@@ -2184,14 +2535,27 @@ fn again_in_software(
     frame: i64,
     total: i64,
 ) -> Result<(), String> {
-    // KG fork (2026-11-04, binding): the Google encoder is removed, so
-    // there is no third MediaCodec component after c2. A stall on c2,
-    // already on the software retry, ends the MediaCodec chain here;
-    // the export-level MPEG-4 fallback (below) is the next step, not
-    // another MediaCodec component. Do NOT re-add OMX.google here.
+    // Phase 3: a pinned attempt (one component, chosen in Settings for
+    // comparison) never retries inside the encoder: a stall on it ends
+    // that attempt, and the export-level plan moves on to MPEG-4.
+    // Without this, a pinned hisi stall would retry on c2 and the
+    // comparison would not be a comparison.
+    if options.only_component.is_some() {
+        log::error!(
+            "export: {error}, {frame} frames of {total} in; a pinned encoder is tried once"
+        );
+        return Err(failed_encoding(error, options));
+    }
+    // KG fork (2026-11-04, amended 2026-11-06): the Google encoder is
+    // out of every default order, so there is no third MediaCodec
+    // component after c2 in a default run - a stall on c2, already on
+    // the software retry, ends the MediaCodec chain here; the
+    // export-level MPEG-4 fallback is the next step, not another
+    // MediaCodec component. Google is reachable only as a pinned manual
+    // choice, never from this retry.
     if options.software_only && component == Some("c2.android.avc.encoder") {
         log::error!(
-            "export: {error}, {frame} frames of {total} in; c2 stalled and no Google encoder is allowed, so no more MediaCodec encoders to try"
+            "export: {error}, {frame} frames of {total} in; c2 stalled and no more MediaCodec encoders to try"
         );
         return Err(failed_encoding(error, options));
     }
@@ -2788,6 +3152,7 @@ pub fn preview_plan(
         crf: 18,
         preset: String::new(),
         codec: VideoCodec::H264,
+        encoder: ExportEncoder::default(),
         ten_bit: false,
         rate_mode: RateMode::Vbr,
         bitrate_kbps: 0,
@@ -3763,6 +4128,7 @@ mod tests {
             crf: 30,
             preset: "ultrafast".into(),
             codec: VideoCodec::H264,
+            encoder: ExportEncoder::default(),
             ten_bit: false,
             rate_mode: RateMode::Vbr,
             bitrate_kbps: 0,
@@ -3846,6 +4212,7 @@ mod tests {
             crf: 30,
             preset: "ultrafast".into(),
             codec: VideoCodec::H264,
+            encoder: ExportEncoder::default(),
             ten_bit: false,
             rate_mode: RateMode::Vbr,
             bitrate_kbps: 0,
@@ -3950,6 +4317,7 @@ mod tests {
             crf: 30,
             preset: "ultrafast".into(),
             codec,
+            encoder: ExportEncoder::default(),
             ten_bit: false,
             rate_mode: RateMode::Vbr,
             bitrate_kbps: 0,
@@ -4069,7 +4437,7 @@ mod tests {
         let stall = |hardware| concat_media::Error::Stalled {
             operation: "encode",
             path: "out.mp4".into(),
-            detail: "the encoder took no frame for 10 seconds".to_owned(),
+            detail: "the encoder took no frame for 3 seconds".to_owned(),
             hardware,
         };
         let mut options = EncodeOptions::default();
@@ -4081,7 +4449,7 @@ mod tests {
         let error = again_in_software(&stall(false), &mut options, None, 30, 480)
             .expect_err("the CPU stalling too ends the export");
         assert!(error.contains("software encoder"), "{error}");
-        assert!(error.contains("took no frame for 10 seconds"), "{error}");
+        assert!(error.contains("took no frame for 3 seconds"), "{error}");
         assert!(options.software_only);
         let error = again_in_software(&stall(true), &mut options, None, 30, 480)
             .expect_err("never a third pass, whatever the encoder says");
@@ -4095,13 +4463,24 @@ mod tests {
         assert!(component_first.software_only);
         assert_eq!(component_first.exclude_component, Some("c2.android.avc.encoder"));
 
-        // KG fork 2026-11-04: a stall on c2, already on the software
-        // retry, ENDS the MediaCodec chain - the Google encoder is
-        // removed, so there is no other component to go again on, and
-        // the export-level MPEG-4 fallback is the next step.
+        // KG fork 2026-11-04 (amended 2026-11-06): a stall on c2,
+        // already on the software retry, ENDS the MediaCodec chain -
+        // the Google encoder is out of every default order, so there is
+        // no other component to go again on, and the export-level
+        // MPEG-4 fallback is the next step.
         let error = again_in_software(&stall(false), &mut component_first, Some("c2.android.avc.encoder"), 0, 480)
             .expect_err("a c2 stall on the software retry ends the MediaCodec chain");
         assert!(error.contains("failed too"), "{error}");
+
+        // Phase 3: a pinned attempt never goes again inside the encoder,
+        // whatever the failure - the plan moves on to the next attempt.
+        let mut pinned = EncodeOptions {
+            only_component: Some("OMX.hisi.video.encoder.avc"),
+            ..EncodeOptions::default()
+        };
+        let error = again_in_software(&stall(true), &mut pinned, Some("OMX.hisi.video.encoder.avc"), 4, 480)
+            .expect_err("a pinned stall ends the attempt at once");
+        assert!(!pinned.software_only, "no retry on a pinned encoder");
 
         // A failure that is not a stall is said as it always was.
         let mut cpu_first = EncodeOptions::default();
@@ -4114,6 +4493,82 @@ mod tests {
         let mut options = EncodeOptions::default();
         assert!(again_in_software(&refused, &mut options, None, 30, 480).is_err());
         assert!(!cpu_first.software_only && !options.software_only);
+    }
+
+    /// The Settings choices parse by name, and every one plans to
+    /// MPEG-4 last - except MPEG-4-only, which is already there. The
+    /// Google encoder is in no Auto order and no Classic order: only
+    /// its own manual choice plans it (Phase 3, KG's 2026-11-06 order).
+    #[test]
+    fn the_export_encoder_choices_plan_to_mpeg4_last() {
+        for mode in ExportEncoder::ALL {
+            assert_eq!(ExportEncoder::parse(mode.name()), Some(mode), "{}", mode.name());
+        }
+        assert_eq!(ExportEncoder::parse("auto"), Some(ExportEncoder::Auto));
+        assert_eq!(
+            ExportEncoder::parse("ffmpeg-google"),
+            Some(ExportEncoder::FfmpegGoogleOnly)
+        );
+        assert_eq!(ExportEncoder::parse("nope"), None);
+        let labels = |encoder: ExportEncoder, codec: VideoCodec| {
+            attempt_plan(encoder, codec, false)
+                .iter()
+                .map(|attempt| attempt.label)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels(ExportEncoder::Mpeg4Only, VideoCodec::H264), ["mpeg4"]);
+        assert_eq!(
+            labels(ExportEncoder::FfmpegGoogleOnly, VideoCodec::H264),
+            ["ffmpeg-google", "mpeg4"]
+        );
+        assert_eq!(
+            labels(ExportEncoder::NativeH264Only, VideoCodec::H264),
+            ["native-h264", "mpeg4"]
+        );
+        assert_eq!(
+            labels(ExportEncoder::NativeHevcOnly, VideoCodec::Hevc),
+            ["native-hevc", "mpeg4"]
+        );
+        assert_eq!(
+            labels(ExportEncoder::ClassicAuto, VideoCodec::H264),
+            ["ffmpeg-hisi", "ffmpeg-c2", "mpeg4"]
+        );
+        for mode in [
+            ExportEncoder::Auto,
+            ExportEncoder::ClassicAuto,
+            ExportEncoder::Mpeg4Only,
+            ExportEncoder::FfmpegHisiOnly,
+            ExportEncoder::FfmpegC2Only,
+            ExportEncoder::NativeH264Only,
+            ExportEncoder::NativeHevcOnly,
+        ] {
+            assert!(
+                !labels(mode, VideoCodec::H264).contains(&"ffmpeg-google"),
+                "{} must not plan Google",
+                mode.name()
+            );
+        }
+        if cfg!(target_os = "android") {
+            assert_eq!(
+                labels(ExportEncoder::Auto, VideoCodec::H264),
+                ["native-h264", "mpeg4"]
+            );
+            assert_eq!(
+                labels(ExportEncoder::Auto, VideoCodec::Hevc),
+                ["native-hevc", "mpeg4"]
+            );
+            // HDR never goes native: Auto on HDR runs the classic order.
+            assert_eq!(
+                attempt_plan(ExportEncoder::Auto, VideoCodec::H264, true)
+                    .iter()
+                    .map(|attempt| attempt.label)
+                    .collect::<Vec<_>>(),
+                ["ffmpeg-hisi", "ffmpeg-c2", "mpeg4"]
+            );
+        } else {
+            // No native encoder off Android: Auto is one FFmpeg attempt.
+            assert_eq!(labels(ExportEncoder::Auto, VideoCodec::H264), ["ffmpeg"]);
+        }
     }
 
     /// Only Linux is told to install a software renderer: a phone has

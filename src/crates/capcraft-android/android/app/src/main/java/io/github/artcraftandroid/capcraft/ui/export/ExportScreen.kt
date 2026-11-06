@@ -100,6 +100,10 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
     var progress by remember { mutableFloatStateOf(0f) }
     // a new try after a failure starts the export again
     var attempt by remember { mutableIntStateOf(0) }
+    // Phase 3: the encoder this export runs on, from Settings; the
+    // export log says which one actually produced the file.
+    val encoderChoice = remember { exportEncoderSetting(context) }
+    val encoderLabel = remember { exportEncoderLabel(encoderChoice) }
     // the export log, read from this run's engine log file when a failure asks for it
     var showLog by remember { mutableStateOf(false) }
     var logText by remember { mutableStateOf("") }
@@ -191,7 +195,7 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                     // is there by the time anyone looks for it.
                     startExport(
                         s,
-                        ExportSettings(res.toUInt(), vm.exportFps.toUInt(), kbps.toUInt(), exportAudioKbps(vm).toUInt(), false, out),
+                        ExportSettings(res.toUInt(), vm.exportFps.toUInt(), kbps.toUInt(), exportAudioKbps(vm).toUInt(), false, encoderChoice, out),
                         listener,
                     )
                     runCatching { writeNativeEncoderList(appContext) }
@@ -291,6 +295,10 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                         )
                         Box(Modifier.padding(start = 8.dp).weight(1f).height(1.dp).background(Color(0x33FFFFFF)))
                     }
+                    // Phase 3: which encoder was selected (the log says
+                    // which one actually produced the file).
+                    Spacer(Modifier.height(12.dp))
+                    Text("Encoder: $encoderLabel", style = Type.Small.copy(textAlign = TextAlign.Center), modifier = Modifier.padding(horizontal = 32.dp))
                 }
                 is Stage.Done -> {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -469,7 +477,7 @@ private fun writeNativeEncoderList(context: Context) {
         val folder = File(context.filesDir, "engine/logs").apply { mkdirs() }
         val name = "native-encoders-" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".txt"
         val lines = mutableListOf<String>()
-        lines.add("native encoders (Android MediaCodecList, Phase 1 order: OMX.hisi first, c2 second, MPEG-4 last, no Google encoder):")
+        lines.add("native encoders (Android MediaCodecList; Phase 3 order: Auto is native H.264 then MPEG-4, Classic is hisi, c2, MPEG-4, Google is a manual test option only):")
         val codecs = android.media.MediaCodecList(android.media.MediaCodecList.ALL_CODECS).codecInfos
             .filter { it.isEncoder }
         val avc = codecs.filter { it.supportedTypes.contains("video/avc") }

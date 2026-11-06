@@ -42,6 +42,12 @@ pub struct ExportSettings {
     pub audio_kbps: u32,
     /// H.265 rather than H.264.
     pub hevc: bool,
+    /// Which encoder runs the export, by name (see
+    /// [`concat_export::ExportEncoder`]): "auto", "classic", "mpeg4",
+    /// "ffmpeg-hisi", "ffmpeg-c2", "ffmpeg-google", "native-h264" or
+    /// "native-hevc". The Settings choice, passed through from the app;
+    /// an unknown name exports as "auto".
+    pub encoder: String,
     /// The file to write.
     pub output: String,
 }
@@ -167,11 +173,27 @@ impl MobileSession {
                 output: settings.output.clone(),
                 crf: 20,
                 preset: "veryfast".to_owned(),
-                codec: if settings.hevc {
-                    VideoCodec::Hevc
-                } else {
-                    VideoCodec::H264
+                codec: {
+                    // Phase 3: the Settings encoder choice names the
+                    // codec for the native choices outright (native-hevc
+                    // means HEVC, native-h264 means H.264); anything
+                    // else keeps the sheet's H.264/H.265 switch.
+                    let encoder = concat_export::ExportEncoder::parse(&settings.encoder)
+                        .unwrap_or_default();
+                    match encoder {
+                        concat_export::ExportEncoder::NativeHevc => VideoCodec::Hevc,
+                        concat_export::ExportEncoder::NativeH264 => VideoCodec::H264,
+                        _ => {
+                            if settings.hevc {
+                                VideoCodec::Hevc
+                            } else {
+                                VideoCodec::H264
+                            }
+                        }
+                    }
                 },
+                encoder: concat_export::ExportEncoder::parse(&settings.encoder)
+                    .unwrap_or_default(),
                 ten_bit: false,
                 // the target to hold; the phone's encoder holds it in VBR
                 rate_mode: RateMode::Cbr,

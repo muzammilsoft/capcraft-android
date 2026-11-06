@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use concat_export::{ExportClip, ExportRequest, Reporter, render_on};
+use concat_export::{ExportClip, ExportEncoder, ExportRequest, Reporter, render_on};
 pub use concat_media::{ColorRange, RateMode, VideoCodec};
 pub use concat_render::WgpuCompositor;
 
@@ -30,6 +30,9 @@ pub struct ExportSpec {
     pub preset: String,
     /// What to encode to.
     pub codec: VideoCodec,
+    /// Which encoder runs the export (see [`concat_export::ExportEncoder`]):
+    /// "auto" by default - the native encoder first, then MPEG-4.
+    pub encoder: ExportEncoder,
     /// Ten bits a channel rather than eight.
     pub ten_bit: bool,
     /// VBR (the CRF carries the quality) or CBR (the bitrate is the
@@ -85,6 +88,7 @@ pub fn request(session: &Session, spec: &ExportSpec, titles: Vec<ExportClip>) ->
         crf: spec.crf,
         preset: spec.preset.clone(),
         codec: spec.codec,
+        encoder: spec.encoder,
         ten_bit: spec.ten_bit,
         rate_mode: spec.rate_mode,
         bitrate_kbps: spec.bitrate_kbps,

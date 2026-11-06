@@ -3,6 +3,64 @@
 Change log for agent-built versions of this fork, newest first.
 Each entry: what changed and why, in KG's terms.
 
+## v0.0.12-beta — Phase 3 (2026-11-06)
+
+KG ordered all of Phase 3 built together, from his own 2026-11-06
+device log (0.0.11-beta): a 22-second video took 68 seconds -
+compositor 2.1 s, flatten/probe 0 ms, hisi stalled after 4 frames, c2
+stalled after 5, each costing the old 10-second patience, then MPEG-4
+encoded 643 frames in 41 s (15.6 fps). A 6-minute attempt died the
+same way. So the startup delay was never project loading: it was
+twenty seconds of dead MediaCodec waiting on every export.
+
+- **Native MediaCodec encoder (the Kinemaster route, the main new
+  work).** A real native path: the NDK's `AMediaCodec`/`AMediaMuxer` C
+  API (libmediandk, no new crates), the component pinned by name -
+  OMX.hisi.video.encoder.avc for H.264, OMX.hisi.video.encoder.hevc
+  for HEVC (smaller files) - with ByteBuffer input, NOT Surface input:
+  the compositor hands back RGBA pixels, so frames go in as YUV420
+  buffers in the layout the codec reports (planar or semi-planar, with
+  its stride and slice height). MPEG-4 stays the fallback if a native
+  encoder fails mid-export. Whether the chip itself stalls the same way
+  FFmpeg's wrapper did is UNPROVEN until KG tests it on his phone.
+- **"Export encoder" setting (Settings tab).** Eight real choices,
+  each with a plain explanation (speed vs reliability vs file size),
+  persisted in SharedPreferences (survives restarts and update-over
+  installs; not in a backup zip - backups hold projects, templates
+  and looks only): Auto (native H.264, then MPEG-4 - the new default),
+  Classic auto (hisi, c2, MPEG-4 - the old order, kept only to
+  compare), MPEG-4 only, H.264 hisi only, H.264 c2 only, H.264 Google
+  only, Native H.264 only, Native HEVC only. The export screen shows
+  the selected encoder; the export log shows the selected one, each
+  attempt with ms and frames, the final encoder, total time and encode
+  fps. Why: KG needs to compare encoders on his own phone without
+  asking which ran.
+- **Google encoder, manual only.** KG ordered it added on 2026-11-06
+  ("try adding it, if it works that is a gain"), lifting his earlier
+  ban for this build only. OMX.google.h264.encoder is a manual
+  Settings choice only - in NO Auto order and NO Classic order - with
+  the same 3-second stall timeout and MPEG-4 fallback, labelled in
+  Settings as a software encoder and an unproven experiment on his
+  Huawei. Device proof is still pending: whether it stalls like
+  hisi/c2 or actually encodes.
+- **Quick wins in the same build.** Stall timeout 10 s -> 3 s per
+  encoder attempt; the compositor/timeline is built ONCE per export
+  and reused across encoder retries instead of re-initialising per
+  retry; per-encoder timing logs in the export log, visible after
+  success as well as failure.
+- **Per-encoder comparison table for KG's phone** (same clip, each
+  setting - fill in on the device; nothing here is claimed until then):
+  Auto, Classic auto, MPEG-4 only, H.264 hisi only, H.264 c2 only,
+  H.264 Google only, Native H.264 only, Native HEVC only - each with
+  its time, file size, and the `export: encoder final=` line from its
+  log. The full table lives in the repo's AGENTS.md (Phase 3 section).
+
+Kept from Phase 1/2, unchanged: MPEG-4 fallback, ExportSheet MBPS
+stops [1,2,3,5,10,20], presets Small / Balanced / Quality, template
+preview + neutral "Split screen", vector shapes, motion graph, stage
+timing logs, backup/restore in Settings only, stable test key (release
+stays DRAFT, not published).
+
 ## v0.0.11-beta — Phase 2 (2026-11-05)
 
 KG ordered all of Phase 2 built together, after 0.0.10-beta proved

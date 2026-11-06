@@ -458,6 +458,7 @@ fn segment_options_for(codec: VideoCodec) -> EncodeOptions {
         threads: 2,
         software_only: false,
         exclude_component: None,
+        only_component: None,
     }
 }
 
@@ -480,6 +481,7 @@ fn copy_options_for(codec: VideoCodec) -> EncodeOptions {
         threads: 2,
         software_only: false,
         exclude_component: None,
+        only_component: None,
     }
 }
 

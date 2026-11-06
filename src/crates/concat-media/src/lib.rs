@@ -20,6 +20,8 @@ pub mod error;
 mod feed;
 mod ffi;
 pub mod hardware;
+#[cfg(target_os = "android")]
+pub mod native_encoder;
 pub mod peaks;
 pub mod pool;
 pub mod prefetch;
@@ -30,7 +32,7 @@ pub mod svg;
 pub mod treat;
 
 pub use decode::{ColorRange, ColorSignal, DecodeOptions, Decoder, FrameSource, SeekableSource};
-pub use encode::{EncodeOptions, Encoder, FrameSink, RateMode, VideoCodec, jpeg};
+pub use encode::{EncodeOptions, Encoder, FrameSink, NativeKind, RateMode, VideoCodec, jpeg};
 pub use error::{Error, Result};
 pub use ffi::{init, linked_version};
 pub use hardware::{HwDevice, HwPolicy, hardware_decode, set_hardware_decode};
