@@ -101,7 +101,7 @@ mod sys {
     pub const MUXER_OUTPUT_MPEG_4: c_int = 0;
 
     #[link(name = "mediandk")]
-    extern "C" {
+    unsafe extern "C" {
         pub fn AMediaCodec_createCodecByName(name: *const c_char) -> *mut AMediaCodec;
         pub fn AMediaCodec_delete(codec: *mut AMediaCodec);
         pub fn AMediaCodec_configure(
@@ -375,23 +375,23 @@ impl NativeEncoder {
             // YUV, exactly as the FFmpeg encoder is set up: without
             // this swscale's default is BT.601, and the file's colours
             // would come out on the wrong matrix for a 709 tag.
-            // SAFETY: `scaler` owns a live SwsContext; the coefficient
+            // (SAFETY: `scaler` owns a live SwsContext; the coefficient
             // tables are static and the call only sets fields on it.
-            unsafe {
-                let coefficients = ffmpeg_the_third::sys::sws_getCoefficients(
-                    ffmpeg_the_third::sys::SWS_CS_ITU709,
-                );
-                ffmpeg_the_third::sys::sws_setColorspaceDetails(
-                    scaler.as_mut_ptr(),
-                    coefficients,
-                    1,
-                    coefficients,
-                    0,
-                    0,
-                    1 << 16,
-                    1 << 16,
-                );
-            }
+            // This sits inside the `unsafe` block above, so no second
+            // `unsafe` is needed here.)
+            let coefficients = ffmpeg_the_third::sys::sws_getCoefficients(
+                ffmpeg_the_third::sys::SWS_CS_ITU709,
+            );
+            ffmpeg_the_third::sys::sws_setColorspaceDetails(
+                scaler.as_mut_ptr(),
+                coefficients,
+                1,
+                coefficients,
+                0,
+                0,
+                1 << 16,
+                1 << 16,
+            );
             log::info!(
                 "export encoder: {} component={} hardware=true color-format={} stride={} slice-height={}",
                 kind.label(),

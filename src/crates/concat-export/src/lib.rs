@@ -4516,37 +4516,45 @@ mod tests {
                 .map(|attempt| attempt.label)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(labels(ExportEncoder::Mpeg4Only, VideoCodec::H264), ["mpeg4"]);
-        assert_eq!(
-            labels(ExportEncoder::FfmpegGoogleOnly, VideoCodec::H264),
-            ["ffmpeg-google", "mpeg4"]
-        );
-        assert_eq!(
-            labels(ExportEncoder::NativeH264Only, VideoCodec::H264),
-            ["native-h264", "mpeg4"]
-        );
-        assert_eq!(
-            labels(ExportEncoder::NativeHevcOnly, VideoCodec::Hevc),
-            ["native-hevc", "mpeg4"]
-        );
-        assert_eq!(
-            labels(ExportEncoder::ClassicAuto, VideoCodec::H264),
-            ["ffmpeg-hisi", "ffmpeg-c2", "mpeg4"]
-        );
-        for mode in [
-            ExportEncoder::Auto,
-            ExportEncoder::ClassicAuto,
-            ExportEncoder::Mpeg4Only,
-            ExportEncoder::FfmpegHisiOnly,
-            ExportEncoder::FfmpegC2Only,
-            ExportEncoder::NativeH264Only,
-            ExportEncoder::NativeHevcOnly,
-        ] {
-            assert!(
-                !labels(mode, VideoCodec::H264).contains(&"ffmpeg-google"),
-                "{} must not plan Google",
-                mode.name()
+        if cfg!(target_os = "android") {
+            assert_eq!(labels(ExportEncoder::Mpeg4Only, VideoCodec::H264), ["mpeg4"]);
+            assert_eq!(
+                labels(ExportEncoder::FfmpegGoogleOnly, VideoCodec::H264),
+                ["ffmpeg-google", "mpeg4"]
             );
+            assert_eq!(
+                labels(ExportEncoder::NativeH264Only, VideoCodec::H264),
+                ["native-h264", "mpeg4"]
+            );
+            assert_eq!(
+                labels(ExportEncoder::NativeHevcOnly, VideoCodec::Hevc),
+                ["native-hevc", "mpeg4"]
+            );
+            assert_eq!(
+                labels(ExportEncoder::ClassicAuto, VideoCodec::H264),
+                ["ffmpeg-hisi", "ffmpeg-c2", "mpeg4"]
+            );
+            for mode in [
+                ExportEncoder::Auto,
+                ExportEncoder::ClassicAuto,
+                ExportEncoder::Mpeg4Only,
+                ExportEncoder::FfmpegHisiOnly,
+                ExportEncoder::FfmpegC2Only,
+                ExportEncoder::NativeH264Only,
+                ExportEncoder::NativeHevcOnly,
+            ] {
+                assert!(
+                    !labels(mode, VideoCodec::H264).contains(&"ffmpeg-google"),
+                    "{} must not plan Google",
+                    mode.name()
+                );
+            }
+        } else {
+            // No native encoder and no named components off Android:
+            // every choice is the one FFmpeg attempt.
+            for mode in ExportEncoder::ALL {
+                assert_eq!(labels(mode, VideoCodec::H264), ["ffmpeg"], "{}", mode.name());
+            }
         }
         if cfg!(target_os = "android") {
             assert_eq!(
