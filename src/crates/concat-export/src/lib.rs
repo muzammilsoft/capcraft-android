@@ -2230,7 +2230,7 @@ fn render_picture(
                             .to_owned(),
                     );
                 }
-                let fps = f64::from(request.rate_num) / f64::from(request.rate_den.max(1));
+                let fps = request.rate_num as f64 / request.rate_den.max(1) as f64;
                 return concat_media::native_encoder::NativeEncoder::create(
                     destination,
                     request.width,
